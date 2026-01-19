@@ -1,31 +1,55 @@
-use crate::systems::{
+use crate::{systems::{
     handle_cast_stage, handle_crop_stage, handle_merge_stage, handle_split_stage,
-};
+}, traits::Processor};
 
 pub mod data;
+pub mod processors;
 pub mod systems;
+pub mod traits;
 
 fn main() {
-    use bevy::prelude::*;
+    let mut frame = data::Frame {
+        width: 3,
+        height: 3,
+        pixels: vec![
+            (255, 0, 0), (0, 255, 0), (0, 0, 255),
+            (255, 255, 0), (0, 255, 255), (255, 0, 255),
+            (192, 192, 192), (128, 128, 128), (64, 64, 64),
+        ],
+    };
 
-    let mut app = App::new();
+    println!("Original Frame: {:?}", frame);
+    let mut processor_list = processors::ProcessList::new();
+    processor_list.add_processor(processors::ClearChannel(processors::Channel::Red));
+    processor_list.add_processor(processors::ClearChannel(processors::Channel::Green));
 
-    app.add_plugins(DefaultPlugins);
+    let mut processor_list2 = processors::ProcessList::new();
+    processor_list2.add_processor(processor_list);
+    processor_list2.add_processor(processors::ClearChannel(processors::Channel::Blue));
 
-    app.add_systems(Startup, setup);
+    processor_list2.process(&mut frame);
+    println!("Processed Frame: {:?}", frame);
 
-    app.add_systems(
-        Update,
-        (
-            handle_crop_stage,
-            handle_cast_stage,
-            handle_split_stage,
-            handle_merge_stage,
-        )
-            .chain(),
-    );
+    // use bevy::prelude::*;
 
-    app.run();
+    // let mut app = App::new();
+
+    // app.add_plugins(DefaultPlugins);
+
+    // app.add_systems(Startup, setup);
+
+    // app.add_systems(
+    //     Update,
+    //     (
+    //         handle_crop_stage,
+    //         handle_cast_stage,
+    //         handle_split_stage,
+    //         handle_merge_stage,
+    //     )
+    //         .chain(),
+    // );
+
+    // app.run();
 }
 
 fn setup(mut commands: bevy::prelude::Commands) {
