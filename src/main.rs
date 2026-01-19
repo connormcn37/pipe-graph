@@ -1,297 +1,249 @@
-use std::collections::HashMap;
-use std::cell::RefCell;
-use std::rc::Rc;
-use std::fmt;
+use std::sync::Arc;
 
-// --- Data Structures ---
-
+// --- 1. The Data Types --- 
+//
+// "Heavy" data is wrapped in Arc so it's cheap to pass around
 #[derive(Clone, Debug)]
-pub struct Frame {
+pub struct VideoFrame {
     pub width: u32,
     pub height: u32,
-    pub channels: u32,
-    pub data: Vec<u8>, // Simplified data buffer
+    pub channels: u8,
+    pub buffer: Vec<u8>, //pixels: Vec<u8>, 
 }
 
-impl Frame {
-    fn new(w: u32, h: u32, c: u32) -> Self {
-        Frame { width: w, height: h, channels: c, data: vec![0; (w * h * c) as usize] }
+impl VideoFrame {
+    // Helper fn
+    pub fn len(&self) -> usize {
+        (self.width * self.height * (self.channels as u32)) as usize
+    }
+    pub fn get_pixel(&self, x: u32, y: u32) -> &[u8] {
+        let stride = self.width * (self.channels as u32);
+        let start = (y * stride + x * (self.channels as u32)) as usize;
+        let end = start + self.channels as usize;
+        &self.buffer[start..end]
     }
 }
 
-// Flexible parameter types
-#[derive(Debug, Clone)]
-pub enum ParamValue {
-    Int(i32),
-    Float(f64),
-    Bool(bool),
+// The unified enum
+#[derive(Clone, Debug)]
+pub enum Signal {
+    // Heavy Data: Cheap to clone because it's just a pointer
+    Image(Arc<VideoFrame>),
+    // Light Control: Cheap to copy because it's just 8 bytes
+    Value(f64),
+    // Empty state for initialization
+    Void,
 }
 
-// --- The Base Components (Composition over Inheritance) ---
+// Helper to safely extract a float from a signal
+impl Signal {
+    fn as_float(&self) -> f64 {
+        match self {
+            Signal::Value(v) => *v,
+            _ => 0.0,
+        }
+    }
+    // Helper to get image or return empty
+    fn as_image(&self) -> Option<&Arc<VideoFrame>> {
+        match self {
+            Signal::Image(img) => Some(img),
+            _ => None,
+        }
+    }
+}
+// --- 2. The Logic Trait ---
 
-// The "Base Class" data that every entity has
-#[derive(Debug)]
-struct BaseEntity {
-    label: String,
-    inputs: Vec<String>, // Labels of input entities
+trait NodeLogic {
+    // We pass *all* inputs here. The Logic decides which is data and which is control.
+    fn process(&mut self, inputs: &[Signal]) -> Signal;
 }
 
-impl BaseEntity {
-    fn new(label: &str) -> Self {
-        Self { label: label.to_string(), inputs: Vec::new() }
+// --- 3. Concrete Nodes ---
+
+// A Generator Node (e.g., LFO)
+struct SineWave {
+    phase: f64,
+}
+impl NodeLogic for SineWave {
+    fn process(&mut self, _inputs: &[Signal]) -> Signal {
+        self.phase += 0.1;
+        Signal::Value((self.phase.sin()+1.0)/2.0)
     }
 }
 
-// --- Traits (Interfaces) ---
-
-pub trait Entity {
-    fn label(&self) -> &str;
-    fn get_input_labels(&self) -> &[String];
-    fn connect(&mut self, input_labels: Vec<String>);
-    fn disconnect(&mut self);
+// A. Source: Generates a solid color video frame
+struct ColorSource {
+    width: u32,
+    height: u32,
 }
 
-pub trait Stage: Entity + fmt::Debug {
-    fn set_parameter(&mut self, key: &str, value: ParamValue);
-    
-    // Returns the cached output of this stage
-    fn get_last_frame(&self) -> Option<Frame>;
-    
-    // The core logic: takes resolved input frames, runs logic, updates internal state
-    fn process(&mut self, inputs: Vec<&Frame>) -> Result<(), String>;
+impl NodeLogic for ColorSource {
+    fn process(&mut self, inputs: &[Signal]) -> Signal {
+        // Optional: Control color via Input[0] (0.0 to 1.0)
+        let intensity = inputs.get(0).map(|s| s.as_float()).unwrap_or(1.0);
+        
+        // Create a dummy frame (Gray value = intensity * 255)
+        let val = (intensity * 255.0) as u8;
+        let size = (self.width * self.height * 3) as usize;
+        let buffer = vec![val; size];
+
+        Signal::Image(Arc::new(VideoFrame {
+            width: self.width,
+            height: self.height,
+            channels: 3,
+            buffer,
+        }))
+    }
 }
 
-// --- Concrete Stage Implementations ---
+// A Processor Node (Crop)
+struct BrightnessEffect;
+impl NodeLogic for BrightnessEffect {
+    fn process(&mut self, inputs: &[Signal]) -> Signal {
+        // Input 0: The Image
+        // Input 1: The Brightness Factor (Control Signal)
+        let factor = inputs.get(1).map(|s| s.as_float()).unwrap_or(1.0);
+        if let Some(img_arc) = inputs.get(0).and_then(|s| s.as_image()) {
+            // COPY-ON-WRITE:
+            // We only allocate a new buffer because we are modifying data.
+            // If we were just reading, we would pass the Arc through.
+            let mut pixels = img_arc.buffer.clone();
+            // Apply brightness (dummy logic)
+            for p in pixels.iter_mut() {
+                *p = (*p as f64 * factor).min(255.0) as u8;
+            }
 
-#[derive(Debug)]
-struct CropStage {
-    base: BaseEntity,
-    params: HashMap<String, ParamValue>,
-    last_output: Option<Frame>,
+            return Signal::Image(Arc::new(VideoFrame {
+                width: img_arc.width,
+                height: img_arc.height,
+                channels: img_arc.channels,
+                buffer: pixels,
+            }));
+        }
+        Signal::Void
+    }
 }
 
-impl CropStage {
-    fn new(label: &str) -> Self {
+// C. Control: Low Frequency Oscillator (LFO)
+struct LFO {
+    phase: f64,
+    speed: f64,
+}
+
+impl NodeLogic for LFO {
+    fn process(&mut self, _inputs: &[Signal]) -> Signal {
+        self.phase += self.speed;
+        // Output a value between 0.0 and 1.0
+        let val = (self.phase.sin() + 1.0) / 2.0;
+        Signal::Value(val)
+    }
+}
+
+// --- 4. The Graph Engine (Tick-Based) ---
+
+struct NodeContainer {
+    name: String,
+    logic: Box<dyn NodeLogic>,
+    // Indices of nodes we pull from
+    inputs: Vec<usize>, 
+    // Double buffer: [Read, Write]
+    buffers: [Signal; 2],
+    active_idx: usize,
+}
+
+impl NodeContainer {
+    fn new(name: &str, logic: Box<dyn NodeLogic>, inputs: Vec<usize>) -> Self {
         Self {
-            base: BaseEntity::new(label),
-            params: HashMap::new(),
-            last_output: None,
+            name: name.to_string(),
+            logic,
+            inputs,
+            buffers: [Signal::Void, Signal::Void],
+            active_idx: 0,
         }
     }
 }
 
-impl Entity for CropStage {
-    fn label(&self) -> &str { &self.base.label }
-    fn get_input_labels(&self) -> &[String] { &self.base.inputs }
-    fn connect(&mut self, inputs: Vec<String>) { self.base.inputs = inputs; }
-    fn disconnect(&mut self) { self.base.inputs.clear(); self.last_output = None; }
-}
-
-impl Stage for CropStage {
-    fn set_parameter(&mut self, key: &str, value: ParamValue) {
-        self.params.insert(key.to_string(), value);
-    }
-
-    fn get_last_frame(&self) -> Option<Frame> {
-        self.last_output.clone()
-    }
-
-    fn process(&mut self, inputs: Vec<&Frame>) -> Result<(), String> {
-        if inputs.is_empty() { return Err("CropStage requires 1 input".into()); }
-        
-        let input = inputs[0];
-        // logic: Perform simulated crop (logic simplified for brevity)
-        // In a real app, read self.params["x"], self.params["width"], etc.
-        println!("  -> [{}] Cropping frame of size {}x{}", self.label(), input.width, input.height);
-        
-        // Save result
-        self.last_output = Some(Frame::new(100, 100, input.channels)); 
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-struct MergeStage {
-    base: BaseEntity,
-    last_output: Option<Frame>,
-}
-
-impl MergeStage {
-    fn new(label: &str) -> Self {
-        Self { base: BaseEntity::new(label), last_output: None }
-    }
-}
-
-impl Entity for MergeStage {
-    fn label(&self) -> &str { &self.base.label }
-    fn get_input_labels(&self) -> &[String] { &self.base.inputs }
-    fn connect(&mut self, inputs: Vec<String>) { self.base.inputs = inputs; }
-    fn disconnect(&mut self) { self.base.inputs.clear(); self.last_output = None; }
-}
-
-impl Stage for MergeStage {
-    fn set_parameter(&mut self, _key: &str, _value: ParamValue) {} // No params needed
-
-    fn get_last_frame(&self) -> Option<Frame> { self.last_output.clone() }
-
-    fn process(&mut self, inputs: Vec<&Frame>) -> Result<(), String> {
-        if inputs.len() < 2 { return Err("MergeStage requires at least 2 inputs".into()); }
-        
-        println!("  -> [{}] Merging {} inputs...", self.label(), inputs.len());
-        
-        // Logic: Create a frame with K channels
-        let k = inputs.len() as u32;
-        self.last_output = Some(Frame::new(inputs[0].width, inputs[0].height, k));
-        Ok(())
-    }
-}
-
-// Source Stage (Mock Camera/File Reader)
-#[derive(Debug)]
-struct SourceStage {
-    base: BaseEntity,
-    last_output: Option<Frame>,
-}
-impl SourceStage {
-    fn new(label: &str) -> Self { Self { base: BaseEntity::new(label), last_output: None } }
-}
-impl Entity for SourceStage {
-    fn label(&self) -> &str { &self.base.label }
-    fn get_input_labels(&self) -> &[String] { &[] } // Source has no inputs
-    fn connect(&mut self, _inputs: Vec<String>) {}
-    fn disconnect(&mut self) {}
-}
-impl Stage for SourceStage {
-    fn set_parameter(&mut self, _key: &str, _value: ParamValue) {}
-    fn get_last_frame(&self) -> Option<Frame> { self.last_output.clone() }
-    fn process(&mut self, _inputs: Vec<&Frame>) -> Result<(), String> {
-        println!("  -> [{}] Generating new frame", self.label());
-        self.last_output = Some(Frame::new(1920, 1080, 3));
-        Ok(())
-    }
-}
-
-// --- The Pipeline ---
-
-pub struct Pipeline {
-    // We use Rc<RefCell<dyn Stage>> to allow shared mutable ownership
-    // The HashMap ensures unique labels
-    stages: HashMap<String, Rc<RefCell<dyn Stage>>>,
-    execution_order: Vec<String>, // Simple list for sequential execution
+struct Pipeline {
+    nodes: Vec<NodeContainer>,
 }
 
 impl Pipeline {
-    pub fn new() -> Self {
-        Self {
-            stages: HashMap::new(),
-            execution_order: Vec::new(),
-        }
+    fn new() -> Self {
+        Self { nodes: Vec::new() }
     }
 
-    pub fn add_stage(&mut self, stage: Box<dyn Stage>) -> Result<(), String> {
-        let label = stage.label().to_string();
-        if self.stages.contains_key(&label) {
-            return Err(format!("Stage with label '{}' already exists", label));
-        }
-        
-        // Add to map
-        self.stages.insert(label.clone(), Rc::new(stage));
-        // Add to execution order (in a real app, you'd calculate topological sort)
-        self.execution_order.push(label);
-        Ok(())
+    fn add_node(&mut self, name: &str, logic: Box<dyn NodeLogic>, inputs: Vec<usize>) -> usize {
+        let node = NodeContainer::new(name, logic, inputs);
+        self.nodes.push(node);
+        self.nodes.len() - 1 // Return ID
     }
 
-    pub fn connect(&mut self, from_label: &str, to_label: &str) -> Result<(), String> {
-        // 1. Get the target stage
-        let target_rc = self.stages.get(to_label)
-            .ok_or(format!("Target stage {} not found", to_label))?;
-            
-        // 2. Validate source exists
-        if !self.stages.contains_key(from_label) {
-            return Err(format!("Source stage {} not found", from_label));
+    fn step(&mut self) {
+        println!("--- Tick ---");
+        // --- STEP 1: SNAPSHOT ---
+        // Create a read-only list of everyone's CURRENT output.
+        // This decouples "reading the world" from "updating the nodes".
+        // Cloning 'Signal' is cheap because it uses Arc.
+        let world_state: Vec<Signal> = self.nodes
+            .iter()
+            .map(|n| n.buffers[n.active_idx].clone())
+            .collect();
+
+        // --- STEP 2: COMPUTE ---
+        // Now we can iterate mutably without looking at 'self.nodes' again.
+        // We look at 'world_state' instead.
+        let mut next_values = Vec::new();
+        for node in &mut self.nodes {
+            // Gather inputs from the *previous* tick of upstream nodes
+            let input_signals: Vec<Signal> = node.inputs
+                .iter()
+                .map(|&src_idx| {
+                    world_state.get(src_idx).cloned().unwrap_or(Signal::Void)
+                })
+                .collect();
+
+            // Run logic
+            let result = node.logic.process(&input_signals);
+            next_values.push(result);
         }
 
-        // 3. Update the target's inputs
-        // Note: In a real implementation, you might want to append, not overwrite.
-        // For now, we fetch existing inputs and add the new one.
-        let mut target = target_rc.borrow_mut();
-        let mut inputs = target.get_input_labels().to_vec();
-        inputs.push(from_label.to_string());
-        target.connect(inputs);
-        
-        Ok(())
-    }
-
-    pub fn step(&mut self) {
-        println!("--- Pipeline Step ---");
-        
-        // We iterate through our defined execution order
-        for label in &self.execution_order {
-            // We need to borrow the stage to run it
-            // We must drop the borrow before moving to the next iteration if possible, 
-            // though here we hold it only for the duration of resolving inputs and processing.
+        // --- STEP 3. COMMIT / SWAP PHASE
+        for (i, val) in next_values.into_iter().enumerate() {
+            let node = &mut self.nodes[i];
             
-            let stage_rc = self.stages.get(label).unwrap();
-            let input_labels = stage_rc.borrow().get_input_labels().to_vec();
-            
-            // Resolve Inputs:
-            // We need to look up the frames from previous stages.
-            let mut input_frames = Vec::new();
-            let mut valid_inputs = true;
-
-            // Gather inputs from the HashMap
-            for input_label in input_labels {
-                if let Some(parent_rc) = self.stages.get(&input_label) {
-                    let parent = parent_rc.borrow();
-                    if let Some(frame) = parent.get_last_frame() {
-                        // We clone the frame (expensive) or the frame needs to be wrapped in Rc
-                        // For this demo, we assume Frame is lightweight or we accept the clone
-                        input_frames.push(frame); 
-                    } else {
-                        println!("Warning: Parent {} has no output yet.", input_label);
-                        valid_inputs = false;
-                    }
-                }
+            // Debug print to prove it works
+            match &val {
+                Signal::Value(v) => println!("  Node '{}' produced Value: {:.2}", node.name, v),
+                Signal::Image(img) => println!("  Node '{}' produced Image: {}x{} [Byte 0: {}]", 
+                    node.name, img.width, img.height, img.buffer.first().unwrap_or(&0)),
+                Signal::Void => println!("  Node '{}' produced Void", node.name),
             }
 
-            if valid_inputs {
-                // To pass references of frames to `process`, we need a temporary vector of references
-                // This is a bit tricky in Rust due to lifetimes, so we do it in a tight scope.
-                 let _ = stage_rc.borrow_mut().process(input_frames.iter().collect());
-            }
+            let write_idx = 1 - node.active_idx;
+            node.buffers[write_idx] = val; // Write to future
+            node.active_idx = write_idx;   // Flip "Future" to "Present"
         }
     }
 }
 
-// --- Usage Example ---
 
 fn main() {
-    let mut pipeline = Pipeline::new();
+    // do something
+    println!("Hello, world!");
 
-    // 1. Create Stages
-    let source1 = SourceStage::new("cam_1");
-    let source2 = SourceStage::new("cam_2");
-    let cropper = CropStage::new("crop_1");
-    let merger = MergeStage::new("merge_final");
+    let mut pipe = Pipeline::new();
 
-    // 2. Add to Pipeline
-    pipeline.add_stage(Box::new(source1)).unwrap();
-    pipeline.add_stage(Box::new(source2)).unwrap();
-    pipeline.add_stage(Box::new(cropper)).unwrap();
-    pipeline.add_stage(Box::new(merger)).unwrap();
+    // Node 0: LFO (Control Signal)
+    let lfo_id = pipe.add_node("LFO", Box::new(LFO { phase: 0.0, speed: 0.5 }), vec![]);
 
-    // 3. Connect (build the graph)
-    // cam_1 -> crop_1
-    pipeline.connect("cam_1", "crop_1").unwrap();
-    
-    // crop_1 -> merge_final
-    pipeline.connect("crop_1", "merge_final").unwrap();
-    
-    // cam_2 -> merge_final
-    pipeline.connect("cam_2", "merge_final").unwrap();
+    // Node 1: Color Source (Data) - Controlled by LFO (Input 0)
+    let src_id = pipe.add_node("Source", Box::new(ColorSource { width: 2, height: 2 }), vec![lfo_id]);
 
-    // 4. Run loop
-    for _ in 0..3 {
-        pipeline.step();
+    // Node 2: Brightness Effect - Takes Source (Input 0) and LFO (Input 1)
+    let bright_id = pipe.add_node("Brightness", Box::new(BrightnessEffect), vec![src_id, lfo_id]);
+
+    // Run 5 frames
+    for _ in 0..5 {
+        pipe.step();
     }
 }
