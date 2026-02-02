@@ -20,6 +20,10 @@ pub struct PortId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EdgeId(pub u64);
 
+/// Identifier for a strongly-connected component in the decomposed graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ComponentId(pub usize);
+
 #[derive(Debug, Clone)]
 pub struct Connection {
     pub from: (NodeId, PortId),
@@ -45,6 +49,25 @@ pub struct Graph {
     next_edge_id: u64,
 }
 
+/// A single SCC in the graph.
+#[derive(Debug, Clone)]
+pub struct Component {
+    pub id: ComponentId,
+    pub nodes: Vec<NodeId>,
+    /// True if the component contains a cycle (size>1 or explicit self-loop).
+    pub is_cyclic: bool,
+}
+
+/// DAG of SCCs (each SCC collapsed to a single vertex).
+#[derive(Debug, Clone)]
+pub struct ComponentGraph {
+    pub components: Vec<Component>,
+    /// Map each node id to its SCC id.
+    pub node_component: HashMap<NodeId, ComponentId>,
+    /// Component-level edges (from_scc -> to_scc).
+    pub edges: HashSet<(ComponentId, ComponentId)>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GraphError {
     DuplicateNodeId(String),
@@ -61,7 +84,10 @@ pub enum GraphValidationError {
     /// An edge connects a node+port to itself.
     SelfLoop { node: NodeId, port: PortId },
     /// Two edges have identical endpoints (from,to).
-    DuplicateEdge { from: (NodeId, PortId), to: (NodeId, PortId) },
+    DuplicateEdge {
+        from: (NodeId, PortId),
+        to: (NodeId, PortId),
+    },
     /// Node has no incident edges (isolated) when required by options.
     UnconnectedNode { node: NodeId },
 }
@@ -102,13 +128,13 @@ impl Graph {
             }
 
             // Missing ports (we only know the name exists / is non-empty).
-            if conn.from.1 .0.trim().is_empty() {
+            if conn.from.1.0.trim().is_empty() {
                 errs.push(GraphValidationError::MissingPort {
                     node: conn.from.0.clone(),
                     port: conn.from.1.clone(),
                 });
             }
-            if conn.to.1 .0.trim().is_empty() {
+            if conn.to.1.0.trim().is_empty() {
                 errs.push(GraphValidationError::MissingPort {
                     node: conn.to.0.clone(),
                     port: conn.to.1.clone(),
@@ -162,6 +188,165 @@ impl Graph {
         }
         self.nodes.insert(spec.id.clone(), spec);
         Ok(())
+    }
+
+    /// Strongly connected components (Tarjan).
+    ///
+    /// Returns components in a stable-ish order (deterministic for a given set of
+    /// node ids and edges), but callers should not rely on a specific ordering.
+    pub fn strongly_connected_components(&self) -> Vec<Vec<NodeId>> {
+        // Build adjacency for node->node based on edges (ports ignored here).
+        let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for id in self.nodes.keys() {
+            adj.entry(id.clone()).or_default();
+        }
+        for conn in self.edges.values() {
+            // Skip dangling endpoints; those are handled by validate().
+            if self.nodes.contains_key(&conn.from.0) && self.nodes.contains_key(&conn.to.0) {
+                adj.entry(conn.from.0.clone())
+                    .or_default()
+                    .push(conn.to.0.clone());
+            }
+        }
+
+        // Tarjan SCC.
+        let mut index: usize = 0;
+        let mut indices: HashMap<NodeId, usize> = HashMap::new();
+        let mut lowlink: HashMap<NodeId, usize> = HashMap::new();
+        let mut stack: Vec<NodeId> = Vec::new();
+        let mut on_stack: HashSet<NodeId> = HashSet::new();
+        let mut out: Vec<Vec<NodeId>> = Vec::new();
+
+        // Deterministic traversal: sort node ids by string.
+        let mut nodes: Vec<NodeId> = adj.keys().cloned().collect();
+        nodes.sort_by(|a, b| a.0.cmp(&b.0));
+
+        fn strongconnect(
+            v: NodeId,
+            index: &mut usize,
+            indices: &mut HashMap<NodeId, usize>,
+            lowlink: &mut HashMap<NodeId, usize>,
+            stack: &mut Vec<NodeId>,
+            on_stack: &mut HashSet<NodeId>,
+            adj: &HashMap<NodeId, Vec<NodeId>>,
+            out: &mut Vec<Vec<NodeId>>,
+        ) {
+            indices.insert(v.clone(), *index);
+            lowlink.insert(v.clone(), *index);
+            *index += 1;
+            stack.push(v.clone());
+            on_stack.insert(v.clone());
+
+            if let Some(nexts) = adj.get(&v) {
+                // Deterministic traversal of outgoing edges.
+                let mut nexts = nexts.clone();
+                nexts.sort_by(|a, b| a.0.cmp(&b.0));
+                for w in nexts {
+                    if !indices.contains_key(&w) {
+                        strongconnect(
+                            w.clone(),
+                            index,
+                            indices,
+                            lowlink,
+                            stack,
+                            on_stack,
+                            adj,
+                            out,
+                        );
+                        let lw = *lowlink.get(&w).unwrap();
+                        let lv = lowlink.get_mut(&v).unwrap();
+                        *lv = (*lv).min(lw);
+                    } else if on_stack.contains(&w) {
+                        let iw = *indices.get(&w).unwrap();
+                        let lv = lowlink.get_mut(&v).unwrap();
+                        *lv = (*lv).min(iw);
+                    }
+                }
+            }
+
+            // If v is a root node, pop the stack and output an SCC.
+            let lv = *lowlink.get(&v).unwrap();
+            let iv = *indices.get(&v).unwrap();
+            if lv == iv {
+                let mut scc: Vec<NodeId> = Vec::new();
+                loop {
+                    let w = stack.pop().expect("tarjan stack underflow");
+                    on_stack.remove(&w);
+                    scc.push(w.clone());
+                    if w == v {
+                        break;
+                    }
+                }
+                // Stable node ordering inside SCC.
+                scc.sort_by(|a, b| a.0.cmp(&b.0));
+                out.push(scc);
+            }
+        }
+
+        for v in nodes {
+            if !indices.contains_key(&v) {
+                strongconnect(
+                    v,
+                    &mut index,
+                    &mut indices,
+                    &mut lowlink,
+                    &mut stack,
+                    &mut on_stack,
+                    &adj,
+                    &mut out,
+                );
+            }
+        }
+
+        out
+    }
+
+    /// Collapse SCCs into a component DAG.
+    pub fn component_graph(&self) -> ComponentGraph {
+        let sccs = self.strongly_connected_components();
+
+        let mut node_component: HashMap<NodeId, ComponentId> = HashMap::new();
+        for (i, comp) in sccs.iter().enumerate() {
+            let cid = ComponentId(i);
+            for n in comp {
+                node_component.insert(n.clone(), cid);
+            }
+        }
+
+        let mut edges: HashSet<(ComponentId, ComponentId)> = HashSet::new();
+        for conn in self.edges.values() {
+            let Some(&a) = node_component.get(&conn.from.0) else {
+                continue;
+            };
+            let Some(&b) = node_component.get(&conn.to.0) else {
+                continue;
+            };
+            if a != b {
+                edges.insert((a, b));
+            }
+        }
+
+        let mut components: Vec<Component> = Vec::with_capacity(sccs.len());
+        for (i, nodes) in sccs.into_iter().enumerate() {
+            let cid = ComponentId(i);
+            let has_self_loop = if nodes.len() == 1 {
+                let n = &nodes[0];
+                self.edges.values().any(|c| c.from.0 == *n && c.to.0 == *n)
+            } else {
+                false
+            };
+            components.push(Component {
+                id: cid,
+                is_cyclic: nodes.len() > 1 || has_self_loop,
+                nodes,
+            });
+        }
+
+        ComponentGraph {
+            components,
+            node_component,
+            edges,
+        }
     }
 
     pub fn connect(
@@ -251,9 +436,10 @@ mod tests {
         );
 
         let errs = g.validate(GraphValidationOptions::default()).unwrap_err();
-        assert!(errs
-            .iter()
-            .any(|e| matches!(e, GraphValidationError::DuplicateEdge { .. })));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, GraphValidationError::DuplicateEdge { .. }))
+        );
     }
 
     #[test]
@@ -268,9 +454,10 @@ mod tests {
         .unwrap();
 
         let errs = g.validate(GraphValidationOptions::default()).unwrap_err();
-        assert!(errs
-            .iter()
-            .any(|e| matches!(e, GraphValidationError::MissingPort { .. })));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, GraphValidationError::MissingPort { .. }))
+        );
     }
 
     #[test]
@@ -291,9 +478,11 @@ mod tests {
                 disallow_self_loops: false,
             })
             .unwrap_err();
-        assert!(errs
-            .iter()
-            .any(|e| matches!(e, GraphValidationError::UnconnectedNode { node } if node.0 == "b")));
+        assert!(
+            errs.iter().any(
+                |e| matches!(e, GraphValidationError::UnconnectedNode { node } if node.0 == "b")
+            )
+        );
     }
 
     #[test]
@@ -312,8 +501,95 @@ mod tests {
                 disallow_self_loops: true,
             })
             .unwrap_err();
-        assert!(errs
-            .iter()
-            .any(|e| matches!(e, GraphValidationError::SelfLoop { .. })));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, GraphValidationError::SelfLoop { .. }))
+        );
+    }
+
+    #[test]
+    fn scc_decomposes_acyclic_chain_into_singletons() {
+        let mut g = Graph::new();
+        g.add_node(node("a")).unwrap();
+        g.add_node(node("b")).unwrap();
+        g.add_node(node("c")).unwrap();
+        g.connect(
+            (NodeId("a".into()), PortId("out".into())),
+            (NodeId("b".into()), PortId("in".into())),
+        )
+        .unwrap();
+        g.connect(
+            (NodeId("b".into()), PortId("out".into())),
+            (NodeId("c".into()), PortId("in".into())),
+        )
+        .unwrap();
+
+        let mut sccs = g.strongly_connected_components();
+        sccs.sort_by(|a, b| a[0].0.cmp(&b[0].0));
+        assert_eq!(sccs.len(), 3);
+        assert_eq!(sccs[0], vec![NodeId("a".into())]);
+        assert_eq!(sccs[1], vec![NodeId("b".into())]);
+        assert_eq!(sccs[2], vec![NodeId("c".into())]);
+    }
+
+    #[test]
+    fn scc_groups_cycle() {
+        let mut g = Graph::new();
+        g.add_node(node("a")).unwrap();
+        g.add_node(node("b")).unwrap();
+        g.connect(
+            (NodeId("a".into()), PortId("out".into())),
+            (NodeId("b".into()), PortId("in".into())),
+        )
+        .unwrap();
+        g.connect(
+            (NodeId("b".into()), PortId("out".into())),
+            (NodeId("a".into()), PortId("in".into())),
+        )
+        .unwrap();
+
+        let sccs = g.strongly_connected_components();
+        assert_eq!(sccs.len(), 1);
+        assert_eq!(sccs[0], vec![NodeId("a".into()), NodeId("b".into())]);
+    }
+
+    #[test]
+    fn component_graph_collapses_sccs_and_builds_dag_edges() {
+        let mut g = Graph::new();
+        g.add_node(node("a")).unwrap();
+        g.add_node(node("b")).unwrap();
+        g.add_node(node("c")).unwrap();
+
+        // a <-> b cycle, plus edge b -> c
+        g.connect(
+            (NodeId("a".into()), PortId("out".into())),
+            (NodeId("b".into()), PortId("in".into())),
+        )
+        .unwrap();
+        g.connect(
+            (NodeId("b".into()), PortId("out".into())),
+            (NodeId("a".into()), PortId("in".into())),
+        )
+        .unwrap();
+        g.connect(
+            (NodeId("b".into()), PortId("out2".into())),
+            (NodeId("c".into()), PortId("in".into())),
+        )
+        .unwrap();
+
+        let cg = g.component_graph();
+        assert_eq!(cg.components.len(), 2);
+
+        let ca = *cg.node_component.get(&NodeId("a".into())).unwrap();
+        let cb = *cg.node_component.get(&NodeId("b".into())).unwrap();
+        let cc = *cg.node_component.get(&NodeId("c".into())).unwrap();
+        assert_eq!(ca, cb);
+        assert_ne!(ca, cc);
+
+        assert!(cg.edges.contains(&(ca, cc)));
+        assert_eq!(cg.edges.len(), 1);
+
+        let cyc = cg.components.iter().find(|c| c.id == ca).unwrap();
+        assert!(cyc.is_cyclic);
     }
 }
