@@ -71,10 +71,10 @@ impl Graph {
         to: (NodeId, PortId),
     ) -> Result<EdgeId, GraphError> {
         if !self.nodes.contains_key(&from.0) {
-            return Err(GraphError::MissingNode(from.0 .0));
+            return Err(GraphError::MissingNode(from.0.0));
         }
         if !self.nodes.contains_key(&to.0) {
-            return Err(GraphError::MissingNode(to.0 .0));
+            return Err(GraphError::MissingNode(to.0.0));
         }
 
         // NOTE: cycles are allowed, but we may still want to treat self-loops specially.
