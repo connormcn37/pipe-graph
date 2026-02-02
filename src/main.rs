@@ -1,11 +1,4 @@
-use crate::{systems::{
-    handle_cast_stage, handle_crop_stage, handle_merge_stage, handle_split_stage,
-}, traits::Processor};
-
-pub mod data;
-pub mod processors;
-pub mod systems;
-pub mod traits;
+use pipe_graph::{data, processors, traits::Processor};
 
 fn main() {
     let mut frame = data::Frame {
