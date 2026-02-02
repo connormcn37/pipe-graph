@@ -1,6 +1,10 @@
-use bevy::{platform::collections::HashMap, prelude::*};
+use std::collections::HashMap;
 
-#[derive(Component, Debug)]
+#[cfg(feature = "bevy")]
+use bevy::prelude::*;
+
+#[derive(Debug)]
+#[cfg_attr(feature = "bevy", derive(Component))]
 pub struct Stage {
     pub parameters: HashMap<String, String>,
 }
@@ -15,14 +19,18 @@ impl Stage {
     }
 }
 
-#[derive(Component, Debug)]
+#[derive(Debug)]
+#[cfg_attr(feature = "bevy", derive(Component))]
 pub struct Crop;
 
-#[derive(Component, Debug)]
+#[derive(Debug)]
+#[cfg_attr(feature = "bevy", derive(Component))]
 pub struct Cast;
 
-#[derive(Component, Debug)]
+#[derive(Debug)]
+#[cfg_attr(feature = "bevy", derive(Component))]
 pub struct Split;
 
-#[derive(Component, Debug)]
+#[derive(Debug)]
+#[cfg_attr(feature = "bevy", derive(Component))]
 pub struct Merge;

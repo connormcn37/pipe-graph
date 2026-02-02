@@ -1,6 +1,8 @@
+#[cfg(feature = "bevy")]
 use bevy::prelude::*;
 
-#[derive(Component, Debug, Clone)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "bevy", derive(Component))]
 pub struct Object {
     pub id: String,
 }

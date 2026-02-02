@@ -1,20 +1,19 @@
-use crate::{systems::{
-    handle_cast_stage, handle_crop_stage, handle_merge_stage, handle_split_stage,
-}, traits::Processor};
-
-pub mod data;
-pub mod processors;
-pub mod systems;
-pub mod traits;
+use pipe_graph::{data, processors, traits::Processor};
 
 fn main() {
     let mut frame = data::Frame {
         width: 3,
         height: 3,
         pixels: vec![
-            (255, 0, 0), (0, 255, 0), (0, 0, 255),
-            (255, 255, 0), (0, 255, 255), (255, 0, 255),
-            (192, 192, 192), (128, 128, 128), (64, 64, 64),
+            (255, 0, 0),
+            (0, 255, 0),
+            (0, 0, 255),
+            (255, 255, 0),
+            (0, 255, 255),
+            (255, 0, 255),
+            (192, 192, 192),
+            (128, 128, 128),
+            (64, 64, 64),
         ],
     };
 
@@ -52,13 +51,14 @@ fn main() {
     // app.run();
 }
 
+#[cfg(feature = "bevy")]
 fn setup(mut commands: bevy::prelude::Commands) {
     commands.spawn((
         data::Object {
             id: "A".to_string(),
         },
         data::Stage {
-            parameters: bevy::platform::collections::HashMap::new(),
+            parameters: std::collections::HashMap::new(),
         },
         data::Crop,
     ));
@@ -70,7 +70,7 @@ fn setup(mut commands: bevy::prelude::Commands) {
         data::Cast,
     ));
 
-    let mut parameters = bevy::platform::collections::HashMap::new();
+    let mut parameters = std::collections::HashMap::new();
     parameters.insert("key".to_string(), "value".to_string());
     commands.spawn((
         data::Object {
