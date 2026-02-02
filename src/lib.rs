@@ -14,6 +14,7 @@
 
 pub mod data;
 pub mod processors;
+#[cfg(feature = "bevy")]
 pub mod systems;
 pub mod traits;
 

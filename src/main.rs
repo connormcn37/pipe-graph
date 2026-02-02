@@ -51,13 +51,14 @@ fn main() {
     // app.run();
 }
 
+#[cfg(feature = "bevy")]
 fn setup(mut commands: bevy::prelude::Commands) {
     commands.spawn((
         data::Object {
             id: "A".to_string(),
         },
         data::Stage {
-            parameters: bevy::platform::collections::HashMap::new(),
+            parameters: std::collections::HashMap::new(),
         },
         data::Crop,
     ));
@@ -69,7 +70,7 @@ fn setup(mut commands: bevy::prelude::Commands) {
         data::Cast,
     ));
 
-    let mut parameters = bevy::platform::collections::HashMap::new();
+    let mut parameters = std::collections::HashMap::new();
     parameters.insert("key".to_string(), "value".to_string());
     commands.spawn((
         data::Object {
