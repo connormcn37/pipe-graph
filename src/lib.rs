@@ -19,3 +19,5 @@ pub mod systems;
 pub mod traits;
 
 pub mod graph;
+
+pub mod tap;
