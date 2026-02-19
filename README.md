@@ -1,5 +1,8 @@
 # pipe-graph
-node graph editor for data (video) pipelines
+
+A dependency-light **pipeline graph runtime** (data-agnostic: video, audio, control, etc.), with room for an optional editor/UI layer later.
+
+This repo currently focuses on the headless core: graph model, validation, SCC decomposition (for cycles), and a first cut at a tap/preview API.
 
 ## Concept:
 
