@@ -22,3 +22,4 @@ pub mod graph;
 pub mod plan;
 
 pub mod tap;
+pub mod executor;
