@@ -88,6 +88,8 @@ pub enum GraphValidationError {
         from: (NodeId, PortId),
         to: (NodeId, PortId),
     },
+    /// More than one edge targets the same input endpoint (node,port).
+    MultipleInboundToPort { node: NodeId, port: PortId },
     /// Node has no incident edges (isolated) when required by options.
     UnconnectedNode { node: NodeId },
 }
@@ -98,6 +100,11 @@ pub struct GraphValidationOptions {
     pub require_all_nodes_connected: bool,
     /// If true, disallow edges that connect a port to itself.
     pub disallow_self_loops: bool,
+    /// If true, disallow multiple inbound edges to the same input port.
+    ///
+    /// This is a common constraint in node/pin UIs where each input pin accepts
+    /// exactly one connection.
+    pub disallow_multiple_inbound_to_port: bool,
 }
 
 impl Graph {
@@ -114,6 +121,8 @@ impl Graph {
 
         // Endpoint-level checks + duplicate detection.
         let mut seen: HashSet<((NodeId, PortId), (NodeId, PortId))> = HashSet::new();
+        let mut inbound_seen: HashSet<(NodeId, PortId)> = HashSet::new();
+
         for conn in self.edges.values() {
             // Missing nodes.
             if !self.nodes.contains_key(&conn.from.0) {
@@ -156,6 +165,17 @@ impl Graph {
                     from: key.0,
                     to: key.1,
                 });
+            }
+
+            // Multiple inbound edges to the same input endpoint.
+            if opts.disallow_multiple_inbound_to_port {
+                let to_key = conn.to.clone();
+                if !inbound_seen.insert(to_key.clone()) {
+                    errs.push(GraphValidationError::MultipleInboundToPort {
+                        node: to_key.0,
+                        port: to_key.1,
+                    });
+                }
             }
         }
 
@@ -411,6 +431,7 @@ mod tests {
         g.validate(GraphValidationOptions {
             require_all_nodes_connected: true,
             disallow_self_loops: true,
+            disallow_multiple_inbound_to_port: false,
         })
         .unwrap();
     }
@@ -440,6 +461,41 @@ mod tests {
             errs.iter()
                 .any(|e| matches!(e, GraphValidationError::DuplicateEdge { .. }))
         );
+    }
+
+    #[test]
+    fn validate_reports_multiple_inbound_to_same_port_when_enabled() {
+        let mut g = Graph::new();
+        g.add_node(node("a")).unwrap();
+        g.add_node(node("b")).unwrap();
+        g.add_node(node("c")).unwrap();
+
+        // a -> c.in and b -> c.in
+        g.connect(
+            (NodeId("a".into()), PortId("out".into())),
+            (NodeId("c".into()), PortId("in".into())),
+        )
+        .unwrap();
+        g.connect(
+            (NodeId("b".into()), PortId("out".into())),
+            (NodeId("c".into()), PortId("in".into())),
+        )
+        .unwrap();
+
+        let errs = g
+            .validate(GraphValidationOptions {
+                disallow_multiple_inbound_to_port: true,
+                ..GraphValidationOptions::default()
+            })
+            .unwrap_err();
+
+        assert!(errs.iter().any(|e| {
+            matches!(
+                e,
+                GraphValidationError::MultipleInboundToPort { node, port }
+                    if node.0 == "c" && port.0 == "in"
+            )
+        }));
     }
 
     #[test]
@@ -476,6 +532,7 @@ mod tests {
             .validate(GraphValidationOptions {
                 require_all_nodes_connected: true,
                 disallow_self_loops: false,
+                disallow_multiple_inbound_to_port: false,
             })
             .unwrap_err();
         assert!(
@@ -499,6 +556,7 @@ mod tests {
             .validate(GraphValidationOptions {
                 require_all_nodes_connected: false,
                 disallow_self_loops: true,
+                disallow_multiple_inbound_to_port: false,
             })
             .unwrap_err();
         assert!(
