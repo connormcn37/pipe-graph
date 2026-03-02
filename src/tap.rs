@@ -12,7 +12,22 @@
 //! - Cloneable handles that can be passed around freely.
 //! - Dependency-light (std only) so core remains headless/minimal.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+
+use crate::graph::{NodeId, PortId};
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TapKey {
+    pub node: NodeId,
+    pub port: PortId,
+}
+
+impl TapKey {
+    pub fn new(node: NodeId, port: PortId) -> Self {
+        Self { node, port }
+    }
+}
 
 #[derive(Debug)]
 struct TapInner<T> {
@@ -25,9 +40,42 @@ struct TapInner<T> {
 /// Notes:
 /// - Values are stored behind an `Arc` so `latest()` is cheap and does not copy.
 /// - `publish()` overwrites the previous value (last-write-wins).
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Tap<T> {
     inner: Arc<Mutex<TapInner<T>>>,
+}
+
+impl<T> Clone for Tap<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+/// Registry for taps keyed by `(node, port)`.
+///
+/// This gives the runtime/editor a stable place to grab "the tap for X" without
+/// having to plumb `Tap<T>` handles everywhere.
+#[derive(Debug)]
+pub struct TapRegistry<T> {
+    inner: Arc<Mutex<HashMap<TapKey, Tap<T>>>>,
+}
+
+impl<T> Default for TapRegistry<T> {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+impl<T> Clone for TapRegistry<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
 }
 
 impl<T> Default for Tap<T> {
@@ -77,6 +125,36 @@ impl<T> Tap<T> {
     }
 }
 
+impl<T> TapRegistry<T> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Get (or create) the tap for a given `(node, port)`.
+    pub fn tap(&self, node: NodeId, port: PortId) -> Tap<T> {
+        let mut g = self.inner.lock().expect("tap registry mutex poisoned");
+        g.entry(TapKey::new(node, port))
+            .or_insert_with(Tap::new)
+            .clone()
+    }
+
+    pub fn remove(&self, key: &TapKey) -> Option<Tap<T>> {
+        self.inner
+            .lock()
+            .expect("tap registry mutex poisoned")
+            .remove(key)
+    }
+
+    pub fn keys(&self) -> Vec<TapKey> {
+        self.inner
+            .lock()
+            .expect("tap registry mutex poisoned")
+            .keys()
+            .cloned()
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,5 +184,16 @@ mod tests {
 
         t1.publish("hello".to_string());
         assert_eq!(t2.latest().as_deref().map(|s| s.as_str()), Some("hello"));
+    }
+
+    #[test]
+    fn registry_returns_same_tap_for_same_key() {
+        let r: TapRegistry<u32> = TapRegistry::new();
+
+        let a1 = r.tap(NodeId("a".into()), PortId("out".into()));
+        let a2 = r.tap(NodeId("a".into()), PortId("out".into()));
+
+        a1.publish(7);
+        assert_eq!(*a2.latest().unwrap(), 7);
     }
 }
