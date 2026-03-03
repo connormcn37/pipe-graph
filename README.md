@@ -2,33 +2,39 @@
 
 A dependency-light **pipeline graph runtime** (data-agnostic: video, audio, control, etc.), with room for an optional editor/UI layer later.
 
-This repo currently focuses on the headless core: graph model, validation, SCC decomposition (for cycles), and a first cut at a tap/preview API.
+This repo currently focuses on the headless core:
+- graph model + structural validation
+- SCC decomposition (cycles/feedback loops are allowed)
+- planning into a component DAG (topo order)
+- a minimal "tap" API for live preview/debugging (latest-value)
 
-## Concept:
+## Build / test
 
-a program for video data pipeline processing. The base class which most objects share inheritance is named `Entity`, which at minimum has: 
-  - a string `label` such that no two entities are allowed to have the same label, thus it can be used as unique id 
-  - `inputs`: a list of input labels referencing other entity instances 
-  - `connect()`: tells the entity to (re)initialize from input labels 
-  - `disconnect()`: release pointers, stop 
-
-A `Stage` is an `Entity` with extra properties: 
-
-  - `parameters`: a dictionary of key:value pairs used by that stage to tune whatever transformation is applied to the input data. 
-
-`Stage` also has functions:
-  - `get_last_frame()`: returns most recent output frame created by this stage. Used for "pull" based data flow 
-  - `push_frame()`: used for "push" based data flow 
-
-There are several different classes representing different kinds of stages such as: 
-  - `CropStage` (crop input frame), 
-  - `CastStage` (change data type between float,uint8), 
-  - `SplitStage` (given an input frame of shape (width, height, k) create k outputs (width,height) )
-  - `MergeStage` (given k inputs of shape (width,height) create 1 output of shape (width,height,k) 
-
-A `Pipeline` is an `Entity` that can be initialized by giving a list of stage types with labels and parameters to initialize them and connect them together. It additionally has the functions: 
-
-  - `start()`: orchestrates the stages data processing sequentially 
-  - `stop()`: stop processing.
-
+```bash
+cargo test
 ```
+
+## Core concepts (current)
+
+### Cycles via SCC planning
+Graphs may contain cycles. We collapse them into strongly-connected components (SCCs) so an executor can:
+- run **acyclic components** in topological order
+- run **cyclic components** with a tick/iterative scheduler
+
+See: `README_core.md` for the current planning/validation API.
+
+### Tap API (latest-value)
+A tap is a lightweight way to observe values without blocking producers.
+
+```rust
+use pipe_graph::tap::Tap;
+
+let tap: Tap<u32> = Tap::new();
+assert!(tap.latest().is_none());
+
+tap.publish(123);
+assert_eq!(*tap.latest().unwrap(), 123);
+```
+
+## Docs
+- `README_core.md` (graph validation, SCC planning, tap API)
