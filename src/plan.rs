@@ -55,6 +55,11 @@ impl Graph {
             cyclic_components,
         })
     }
+
+    /// Convenience: compile using the common UI/editor validation preset.
+    pub fn plan_strict(&self) -> Result<GraphPlan, GraphPlanError> {
+        self.plan(GraphValidationOptions::strict())
+    }
 }
 
 fn topo_sort_components(cg: &ComponentGraph) -> Option<Vec<ComponentId>> {
