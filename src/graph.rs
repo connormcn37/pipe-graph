@@ -107,6 +107,17 @@ pub struct GraphValidationOptions {
     pub disallow_multiple_inbound_to_port: bool,
 }
 
+impl GraphValidationOptions {
+    /// A reasonable "UI/editor" preset: catch the most common structural issues.
+    pub fn strict() -> Self {
+        Self {
+            require_all_nodes_connected: true,
+            disallow_self_loops: true,
+            disallow_multiple_inbound_to_port: true,
+        }
+    }
+}
+
 impl Graph {
     pub fn new() -> Self {
         Self::default()
@@ -434,6 +445,14 @@ mod tests {
             disallow_multiple_inbound_to_port: false,
         })
         .unwrap();
+    }
+
+    #[test]
+    fn strict_options_enable_common_ui_invariants() {
+        let opts = GraphValidationOptions::strict();
+        assert!(opts.require_all_nodes_connected);
+        assert!(opts.disallow_self_loops);
+        assert!(opts.disallow_multiple_inbound_to_port);
     }
 
     #[test]
