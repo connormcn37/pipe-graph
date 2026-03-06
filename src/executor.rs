@@ -38,6 +38,12 @@ impl Executor {
         Ok(Self { plan })
     }
 
+    /// Compile using the common UI/editor validation preset.
+    pub fn compile_strict(g: &Graph) -> Result<Self, ExecutorError> {
+        let plan = g.plan_strict().map_err(ExecutorError::Plan)?;
+        Ok(Self { plan })
+    }
+
     /// Run the graph according to the chosen tick mode.
     ///
     /// This is currently a no-op skeleton that only demonstrates scheduling.
@@ -120,5 +126,8 @@ mod tests {
 
         let ex = Executor::compile(&g, GraphValidationOptions::default()).unwrap();
         assert_eq!(ex.plan.component_graph.components.len(), 2);
+
+        let ex2 = Executor::compile_strict(&g).unwrap();
+        assert_eq!(ex2.plan.component_graph.components.len(), 2);
     }
 }
