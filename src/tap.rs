@@ -17,15 +17,40 @@ use std::sync::{Arc, Mutex};
 
 use crate::graph::{NodeId, PortId};
 
+/// Where in the graph a tap is attached.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TapKey {
-    pub node: NodeId,
-    pub port: PortId,
+pub enum TapPoint {
+    /// Tap a named output or input port on a node.
+    NodePort { node: NodeId, port: PortId },
+    /// Tap a specific edge (from node+port to node+port).
+    ///
+    /// Useful when a node has multiple outgoing edges from the same port and you
+    /// want to observe per-consumer values.
+    Edge {
+        from_node: NodeId,
+        from_port: PortId,
+        to_node: NodeId,
+        to_port: PortId,
+    },
 }
 
-impl TapKey {
-    pub fn new(node: NodeId, port: PortId) -> Self {
-        Self { node, port }
+impl TapPoint {
+    pub fn node_port(node: NodeId, port: PortId) -> Self {
+        Self::NodePort { node, port }
+    }
+
+    pub fn edge(
+        from_node: NodeId,
+        from_port: PortId,
+        to_node: NodeId,
+        to_port: PortId,
+    ) -> Self {
+        Self::Edge {
+            from_node,
+            from_port,
+            to_node,
+            to_port,
+        }
     }
 }
 
@@ -53,13 +78,13 @@ impl<T> Clone for Tap<T> {
     }
 }
 
-/// Registry for taps keyed by `(node, port)`.
+/// Registry for taps keyed by attachment point.
 ///
 /// This gives the runtime/editor a stable place to grab "the tap for X" without
 /// having to plumb `Tap<T>` handles everywhere.
 #[derive(Debug)]
 pub struct TapRegistry<T> {
-    inner: Arc<Mutex<HashMap<TapKey, Tap<T>>>>,
+    inner: Arc<Mutex<HashMap<TapPoint, Tap<T>>>>,
 }
 
 impl<T> Default for TapRegistry<T> {
@@ -130,22 +155,36 @@ impl<T> TapRegistry<T> {
         Self::default()
     }
 
-    /// Get (or create) the tap for a given `(node, port)`.
-    pub fn tap(&self, node: NodeId, port: PortId) -> Tap<T> {
+    /// Get (or create) the tap for a given attachment point.
+    pub fn tap_at(&self, point: TapPoint) -> Tap<T> {
         let mut g = self.inner.lock().expect("tap registry mutex poisoned");
-        g.entry(TapKey::new(node, port))
-            .or_insert_with(Tap::new)
-            .clone()
+        g.entry(point).or_insert_with(Tap::new).clone()
     }
 
-    pub fn remove(&self, key: &TapKey) -> Option<Tap<T>> {
+    /// Convenience: tap a `(node, port)`.
+    pub fn tap(&self, node: NodeId, port: PortId) -> Tap<T> {
+        self.tap_at(TapPoint::node_port(node, port))
+    }
+
+    /// Convenience: tap a specific edge.
+    pub fn tap_edge(
+        &self,
+        from_node: NodeId,
+        from_port: PortId,
+        to_node: NodeId,
+        to_port: PortId,
+    ) -> Tap<T> {
+        self.tap_at(TapPoint::edge(from_node, from_port, to_node, to_port))
+    }
+
+    pub fn remove(&self, point: &TapPoint) -> Option<Tap<T>> {
         self.inner
             .lock()
             .expect("tap registry mutex poisoned")
-            .remove(key)
+            .remove(point)
     }
 
-    pub fn keys(&self) -> Vec<TapKey> {
+    pub fn points(&self) -> Vec<TapPoint> {
         self.inner
             .lock()
             .expect("tap registry mutex poisoned")
@@ -187,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_returns_same_tap_for_same_key() {
+    fn registry_returns_same_tap_for_same_point() {
         let r: TapRegistry<u32> = TapRegistry::new();
 
         let a1 = r.tap(NodeId("a".into()), PortId("out".into()));
@@ -195,5 +234,26 @@ mod tests {
 
         a1.publish(7);
         assert_eq!(*a2.latest().unwrap(), 7);
+    }
+
+    #[test]
+    fn registry_supports_edge_taps() {
+        let r: TapRegistry<&'static str> = TapRegistry::new();
+
+        let t1 = r.tap_edge(
+            NodeId("a".into()),
+            PortId("out".into()),
+            NodeId("b".into()),
+            PortId("in".into()),
+        );
+        let t2 = r.tap_edge(
+            NodeId("a".into()),
+            PortId("out".into()),
+            NodeId("b".into()),
+            PortId("in".into()),
+        );
+
+        t1.publish("hi");
+        assert_eq!(t2.latest().map(|x| *x), Some("hi"));
     }
 }

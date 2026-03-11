@@ -13,10 +13,10 @@ fn main() {
     let out = taps.tap(NodeId("node_a".into()), PortId("out".into()));
     out.publish("hello".to_string());
 
-    // Somewhere else, a consumer retrieves the same tap by key.
+    // Somewhere else, a consumer retrieves the same tap point.
     let out2 = taps.tap(NodeId("node_a".into()), PortId("out".into()));
     let v = out2.latest().map(|x| x.as_str().to_string());
 
     println!("latest: {v:?}");
-    println!("keys: {:?}", taps.keys());
+    println!("points: {:?}", taps.points());
 }
