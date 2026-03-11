@@ -79,6 +79,8 @@ pub enum GraphError {
 pub enum GraphValidationError {
     /// An edge references a node id that does not exist.
     MissingNode { node: NodeId },
+    /// The graph contains at least one cycle (SCC with >1 node or explicit self-loop).
+    CyclicComponent { nodes: Vec<NodeId> },
     /// An edge references an empty port id ("" after trimming).
     MissingPort { node: NodeId, port: PortId },
     /// An edge connects a node+port to itself.
@@ -94,7 +96,7 @@ pub enum GraphValidationError {
     UnconnectedNode { node: NodeId },
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct GraphValidationOptions {
     /// If true, a node must appear in at least one edge (in or out).
     pub require_all_nodes_connected: bool,
@@ -105,6 +107,19 @@ pub struct GraphValidationOptions {
     /// This is a common constraint in node/pin UIs where each input pin accepts
     /// exactly one connection.
     pub disallow_multiple_inbound_to_port: bool,
+    /// If true, disallow any cycles in the graph.
+    pub disallow_cycles: bool,
+}
+
+impl Default for GraphValidationOptions {
+    fn default() -> Self {
+        Self {
+            require_all_nodes_connected: false,
+            disallow_self_loops: false,
+            disallow_multiple_inbound_to_port: false,
+            disallow_cycles: false,
+        }
+    }
 }
 
 impl GraphValidationOptions {
@@ -114,6 +129,15 @@ impl GraphValidationOptions {
             require_all_nodes_connected: true,
             disallow_self_loops: true,
             disallow_multiple_inbound_to_port: true,
+            disallow_cycles: false,
+        }
+    }
+
+    /// Strict + acyclic (useful for DAG-only schedulers).
+    pub fn strict_acyclic() -> Self {
+        Self {
+            disallow_cycles: true,
+            ..Self::strict()
         }
     }
 }
@@ -199,6 +223,15 @@ impl Graph {
             for id in self.nodes.keys() {
                 if !connected.contains(id) {
                     errs.push(GraphValidationError::UnconnectedNode { node: id.clone() });
+                }
+            }
+        }
+
+        if opts.disallow_cycles {
+            // Use SCC decomposition to detect cycles.
+            for c in self.component_graph().components {
+                if c.is_cyclic {
+                    errs.push(GraphValidationError::CyclicComponent { nodes: c.nodes });
                 }
             }
         }
@@ -443,6 +476,7 @@ mod tests {
             require_all_nodes_connected: true,
             disallow_self_loops: true,
             disallow_multiple_inbound_to_port: false,
+            disallow_cycles: false,
         })
         .unwrap();
     }
@@ -453,6 +487,10 @@ mod tests {
         assert!(opts.require_all_nodes_connected);
         assert!(opts.disallow_self_loops);
         assert!(opts.disallow_multiple_inbound_to_port);
+        assert!(!opts.disallow_cycles);
+
+        let opts2 = GraphValidationOptions::strict_acyclic();
+        assert!(opts2.disallow_cycles);
     }
 
     #[test]
@@ -552,6 +590,7 @@ mod tests {
                 require_all_nodes_connected: true,
                 disallow_self_loops: false,
                 disallow_multiple_inbound_to_port: false,
+                disallow_cycles: false,
             })
             .unwrap_err();
         assert!(
@@ -576,6 +615,7 @@ mod tests {
                 require_all_nodes_connected: false,
                 disallow_self_loops: true,
                 disallow_multiple_inbound_to_port: false,
+                disallow_cycles: false,
             })
             .unwrap_err();
         assert!(
@@ -628,6 +668,17 @@ mod tests {
         let sccs = g.strongly_connected_components();
         assert_eq!(sccs.len(), 1);
         assert_eq!(sccs[0], vec![NodeId("a".into()), NodeId("b".into())]);
+
+        let errs = g
+            .validate(GraphValidationOptions {
+                disallow_cycles: true,
+                ..GraphValidationOptions::default()
+            })
+            .unwrap_err();
+        assert!(errs.iter().any(|e| matches!(
+            e,
+            GraphValidationError::CyclicComponent { .. }
+        )));
     }
 
     #[test]
