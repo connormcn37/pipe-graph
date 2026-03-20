@@ -21,7 +21,7 @@ The plan marks which components are cyclic so an executor can run:
 ## Tap API (latest-value)
 A **tap** is a lightweight way to observe values flowing through the graph without blocking producers.
 
-`Tap<T>` stores only the latest published value:
+`Tap<T>` stores only the latest published value (and a monotonic seq counter):
 
 ```rust
 use pipe_graph::tap::Tap;

@@ -144,6 +144,15 @@ impl<T> Tap<T> {
             .cloned()
     }
 
+    /// Fetch `(seq, latest)` under a single lock.
+    ///
+    /// This avoids a TOCTOU race where callers do `seq()` and `latest()` in two
+    /// separate calls and end up pairing a value with the wrong sequence.
+    pub fn latest_with_seq(&self) -> (u64, Option<Arc<T>>) {
+        let g = self.inner.lock().expect("tap mutex poisoned");
+        (g.seq, g.latest.as_ref().cloned())
+    }
+
     /// Clear the stored latest value (sequence number remains unchanged).
     pub fn clear(&self) {
         self.inner.lock().expect("tap mutex poisoned").latest = None;
@@ -214,6 +223,10 @@ mod tests {
         assert_eq!(s1, 1);
         assert_eq!(s2, 2);
         assert_eq!(*t.latest().unwrap(), 2);
+
+        let (seq, v) = t.latest_with_seq();
+        assert_eq!(seq, 2);
+        assert_eq!(*v.unwrap(), 2);
     }
 
     #[test]
