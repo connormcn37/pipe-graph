@@ -11,7 +11,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use crate::graph::{
-    ComponentGraph, ComponentId, Graph, GraphValidationError, GraphValidationOptions,
+    ComponentGraph, ComponentId, Graph, GraphValidationError, GraphValidationOptions, NodeId,
 };
 
 #[derive(Debug, Clone)]
@@ -21,6 +21,40 @@ pub struct GraphPlan {
     pub component_order: Vec<ComponentId>,
     /// Components that represent cycles.
     pub cyclic_components: Vec<ComponentId>,
+}
+
+impl GraphPlan {
+    /// Convenience: return an acyclic execution order of node ids.
+    ///
+    /// This flattens `component_order` and skips cyclic components.
+    ///
+    /// Notes:
+    /// - Node order within a component is stable (sorted by `NodeId.0`).
+    /// - Cyclic SCCs are intentionally excluded; a tick-based scheduler should
+    ///   decide how to order/iterate nodes inside them.
+    pub fn acyclic_node_order(&self) -> Vec<NodeId> {
+        let mut out: Vec<NodeId> = Vec::new();
+        for &cid in &self.component_order {
+            if self.cyclic_components.contains(&cid) {
+                continue;
+            }
+            if let Some(comp) = self.component_graph.components.iter().find(|c| c.id == cid) {
+                out.extend(comp.nodes.iter().cloned());
+            }
+        }
+        out
+    }
+
+    /// Convenience: return the cyclic SCCs as groups of node ids (stable).
+    pub fn cyclic_node_groups(&self) -> Vec<Vec<NodeId>> {
+        let mut out: Vec<Vec<NodeId>> = Vec::new();
+        for &cid in &self.cyclic_components {
+            if let Some(comp) = self.component_graph.components.iter().find(|c| c.id == cid) {
+                out.push(comp.nodes.clone());
+            }
+        }
+        out
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,6 +200,10 @@ mod tests {
         let posa = plan.component_order.iter().position(|&x| x == ca).unwrap();
         let posc = plan.component_order.iter().position(|&x| x == cc).unwrap();
         assert!(posa < posc);
+
+        // helper methods
+        assert_eq!(plan.acyclic_node_order(), vec![NodeId("c".into())]);
+        assert_eq!(plan.cyclic_node_groups(), vec![vec![NodeId("a".into()), NodeId("b".into())]]);
     }
 
     #[test]
