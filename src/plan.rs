@@ -75,13 +75,20 @@ impl Graph {
         let component_order =
             topo_sort_components(&component_graph).ok_or(GraphPlanError::InternalCycle)?;
 
-        let mut cyclic_components: Vec<ComponentId> = component_graph
-            .components
+        // Prefer cyclic components in *topological order* (of the component DAG).
+        // This is more useful for tick schedulers than sorting by raw id.
+        let cyclic_components: Vec<ComponentId> = component_order
             .iter()
-            .filter(|c| c.is_cyclic)
-            .map(|c| c.id)
+            .copied()
+            .filter(|cid| {
+                component_graph
+                    .components
+                    .iter()
+                    .find(|c| c.id == *cid)
+                    .map(|c| c.is_cyclic)
+                    .unwrap_or(false)
+            })
             .collect();
-        cyclic_components.sort();
 
         Ok(GraphPlan {
             component_graph,
