@@ -2,6 +2,8 @@
 
 ## Graph validation
 Use `Graph::validate(opts)` to catch structural problems early:
+- empty node ids
+- empty node kinds
 - missing node references
 - empty port names
 - duplicate edges

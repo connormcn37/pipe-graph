@@ -77,6 +77,10 @@ pub enum GraphError {
 /// Errors returned by [`Graph::validate`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GraphValidationError {
+    /// A node id is empty ("" after trimming).
+    EmptyNodeId { node: NodeId },
+    /// A node kind is empty ("" after trimming).
+    EmptyNodeKind { node: NodeId },
     /// An edge references a node id that does not exist.
     MissingNode { node: NodeId },
     /// The graph contains at least one cycle (SCC with >1 node or explicit self-loop).
@@ -153,6 +157,20 @@ impl Graph {
     /// knowable from the core `Graph` model (nodes, edges, and port *names*).
     pub fn validate(&self, opts: GraphValidationOptions) -> Result<(), Vec<GraphValidationError>> {
         let mut errs: Vec<GraphValidationError> = Vec::new();
+
+        // Node-level checks.
+        for spec in self.nodes.values() {
+            if spec.id.0.trim().is_empty() {
+                errs.push(GraphValidationError::EmptyNodeId {
+                    node: spec.id.clone(),
+                });
+            }
+            if spec.kind.trim().is_empty() {
+                errs.push(GraphValidationError::EmptyNodeKind {
+                    node: spec.id.clone(),
+                });
+            }
+        }
 
         // Endpoint-level checks + duplicate detection.
         let mut seen: HashSet<((NodeId, PortId), (NodeId, PortId))> = HashSet::new();
@@ -491,6 +509,33 @@ mod tests {
 
         let opts2 = GraphValidationOptions::strict_acyclic();
         assert!(opts2.disallow_cycles);
+    }
+
+    #[test]
+    fn validate_reports_empty_node_id_and_kind() {
+        let mut g = Graph::new();
+        g.add_node(NodeSpec {
+            id: NodeId("   ".into()),
+            kind: "noop".into(),
+            params: Params::default(),
+        })
+        .unwrap();
+        g.add_node(NodeSpec {
+            id: NodeId("x".into()),
+            kind: "   ".into(),
+            params: Params::default(),
+        })
+        .unwrap();
+
+        let errs = g.validate(GraphValidationOptions::default()).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, GraphValidationError::EmptyNodeId { .. }))
+        );
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, GraphValidationError::EmptyNodeKind { .. }))
+        );
     }
 
     #[test]
