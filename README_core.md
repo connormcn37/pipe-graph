@@ -23,6 +23,8 @@ The plan marks which components are cyclic so an executor can run:
 ## Tap API (latest-value)
 A **tap** is a lightweight way to observe values flowing through the graph without blocking producers.
 
+Also see `src/bin/tap_demo.rs` for a runnable example (node+port tap + edge tap).
+
 `Tap<T>` stores only the latest published value (and a monotonic seq counter):
 
 ```rust
