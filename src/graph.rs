@@ -264,6 +264,11 @@ impl Graph {
         }
     }
 
+    /// Convenience: validate using the common UI/editor strict preset.
+    pub fn validate_strict(&self) -> Result<(), Vec<GraphValidationError>> {
+        self.validate(GraphValidationOptions::strict())
+    }
+
     pub fn add_node(&mut self, spec: NodeSpec) -> Result<(), GraphError> {
         if self.nodes.contains_key(&spec.id) {
             return Err(GraphError::DuplicateNodeId(spec.id.0));

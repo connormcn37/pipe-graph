@@ -1,7 +1,7 @@
 # Core runtime notes (WIP)
 
 ## Graph validation
-Use `Graph::validate(opts)` to catch structural problems early:
+Use `Graph::validate(opts)` (or `Graph::validate_strict()`) to catch structural problems early:
 - empty node ids
 - empty node kinds
 - missing node references
