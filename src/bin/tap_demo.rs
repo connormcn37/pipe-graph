@@ -35,5 +35,8 @@ fn main() {
 
     println!("node tap publish seq: {seq1}");
     println!("node tap latest_with_seq: ({seq2}, {v:?})");
-    println!("points: {:?}", taps.points());
+    println!("points (sorted):");
+    for p in taps.points_sorted() {
+        println!("  - {p}");
+    }
 }

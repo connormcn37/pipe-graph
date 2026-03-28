@@ -13,6 +13,7 @@
 //! - Dependency-light (std only) so core remains headless/minimal.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use crate::graph::{NodeId, PortId};
@@ -50,6 +51,20 @@ impl TapPoint {
             from_port,
             to_node,
             to_port,
+        }
+    }
+}
+
+impl fmt::Display for TapPoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TapPoint::NodePort { node, port } => write!(f, "{}.{}", node.0, port.0),
+            TapPoint::Edge {
+                from_node,
+                from_port,
+                to_node,
+                to_port,
+            } => write!(f, "{}.{} -> {}.{}", from_node.0, from_port.0, to_node.0, to_port.0),
         }
     }
 }
@@ -200,6 +215,13 @@ impl<T> TapRegistry<T> {
             .keys()
             .cloned()
             .collect()
+    }
+
+    /// Deterministic list of tap attachment points.
+    pub fn points_sorted(&self) -> Vec<TapPoint> {
+        let mut pts = self.points();
+        pts.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+        pts
     }
 }
 
