@@ -95,8 +95,32 @@ impl Executor {
             .unwrap_or(false)
     }
 
-    fn exec_component(&self, _cid: ComponentId) {
-        // Placeholder. Eventually: execute nodes in this SCC in a policy-defined order.
+    fn exec_component(&self, cid: ComponentId) {
+        // Placeholder scheduling demo: execute nodes in this SCC in a stable order.
+        //
+        // Notes:
+        // - For acyclic SCCs, this is a reasonable default.
+        // - For cyclic SCCs, a real engine likely needs a policy (fixed-point
+        //   iteration, limited inner iters, pull/push semantics, etc.). Here we
+        //   just demonstrate that cycles are isolated *as SCCs* and can be run
+        //   as a unit.
+        let Some(comp) = self
+            .plan
+            .component_graph
+            .components
+            .iter()
+            .find(|c| c.id == cid)
+        else {
+            return;
+        };
+
+        for nid in &comp.nodes {
+            self.exec_node(nid);
+        }
+    }
+
+    fn exec_node(&self, _nid: &crate::graph::NodeId) {
+        // Placeholder. Eventually: look up processor for node kind and execute.
     }
 }
 
