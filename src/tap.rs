@@ -14,9 +14,10 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
-use crate::graph::{NodeId, PortId};
+use crate::graph::{Graph, NodeId, PortId};
 
 /// Where in the graph a tap is attached.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -65,6 +66,132 @@ impl fmt::Display for TapPoint {
                 to_node,
                 to_port,
             } => write!(f, "{}.{} -> {}.{}", from_node.0, from_port.0, to_node.0, to_port.0),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TapPointParseError {
+    Empty,
+    BadFormat(String),
+}
+
+fn parse_endpoint(s: &str) -> Result<(NodeId, PortId), TapPointParseError> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err(TapPointParseError::Empty);
+    }
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() != 2 {
+        return Err(TapPointParseError::BadFormat(s.to_string()));
+    }
+    let node = parts[0].trim();
+    let port = parts[1].trim();
+    if node.is_empty() || port.is_empty() {
+        return Err(TapPointParseError::BadFormat(s.to_string()));
+    }
+    Ok((NodeId(node.to_string()), PortId(port.to_string())))
+}
+
+impl FromStr for TapPoint {
+    type Err = TapPointParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim();
+        if s.is_empty() {
+            return Err(TapPointParseError::Empty);
+        }
+
+        if let Some((lhs, rhs)) = s.split_once("->") {
+            let (from_node, from_port) = parse_endpoint(lhs)?;
+            let (to_node, to_port) = parse_endpoint(rhs)?;
+            return Ok(TapPoint::edge(from_node, from_port, to_node, to_port));
+        }
+
+        let (node, port) = parse_endpoint(s)?;
+        Ok(TapPoint::node_port(node, port))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TapPointValidationError {
+    MissingNode { node: NodeId },
+    MissingPort { node: NodeId, port: PortId },
+    MissingEdge {
+        from_node: NodeId,
+        from_port: PortId,
+        to_node: NodeId,
+        to_port: PortId,
+    },
+}
+
+/// Validate that a tap point refers to something that exists in the graph.
+///
+/// Note: core `Graph` does not currently model port schemas per node kind.
+/// This validator checks only:
+/// - node ids exist
+/// - port ids are non-empty
+/// - for edge taps: an exact edge exists with those endpoints
+pub fn validate_tap_point(g: &Graph, p: &TapPoint) -> Result<(), TapPointValidationError> {
+    match p {
+        TapPoint::NodePort { node, port } => {
+            if !g.nodes.contains_key(node) {
+                return Err(TapPointValidationError::MissingNode { node: node.clone() });
+            }
+            if port.0.trim().is_empty() {
+                return Err(TapPointValidationError::MissingPort {
+                    node: node.clone(),
+                    port: port.clone(),
+                });
+            }
+            Ok(())
+        }
+        TapPoint::Edge {
+            from_node,
+            from_port,
+            to_node,
+            to_port,
+        } => {
+            if !g.nodes.contains_key(from_node) {
+                return Err(TapPointValidationError::MissingNode {
+                    node: from_node.clone(),
+                });
+            }
+            if !g.nodes.contains_key(to_node) {
+                return Err(TapPointValidationError::MissingNode {
+                    node: to_node.clone(),
+                });
+            }
+            if from_port.0.trim().is_empty() {
+                return Err(TapPointValidationError::MissingPort {
+                    node: from_node.clone(),
+                    port: from_port.clone(),
+                });
+            }
+            if to_port.0.trim().is_empty() {
+                return Err(TapPointValidationError::MissingPort {
+                    node: to_node.clone(),
+                    port: to_port.clone(),
+                });
+            }
+
+            let exists = g.edges.values().any(|c| {
+                c.from.0 == *from_node
+                    && c.from.1 == *from_port
+                    && c.to.0 == *to_node
+                    && c.to.1 == *to_port
+            });
+
+            if !exists {
+                return Err(TapPointValidationError::MissingEdge {
+                    from_node: from_node.clone(),
+                    from_port: from_port.clone(),
+                    to_node: to_node.clone(),
+                    to_port: to_port.clone(),
+                });
+            }
+
+            Ok(())
         }
     }
 }
@@ -228,6 +355,87 @@ impl<T> TapRegistry<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::{Connection, EdgeId, NodeSpec, Params};
+
+    #[test]
+    fn tap_point_parse_node_port() {
+        let p: TapPoint = "a.out".parse().unwrap();
+        assert_eq!(p, TapPoint::node_port(NodeId("a".into()), PortId("out".into())));
+    }
+
+    #[test]
+    fn tap_point_parse_edge_variants() {
+        let p1: TapPoint = "a.out->b.in".parse().unwrap();
+        let p2: TapPoint = "a.out -> b.in".parse().unwrap();
+        assert_eq!(p1, p2);
+        assert_eq!(
+            p1,
+            TapPoint::edge(
+                NodeId("a".into()),
+                PortId("out".into()),
+                NodeId("b".into()),
+                PortId("in".into())
+            )
+        );
+    }
+
+    fn small_graph() -> Graph {
+        let mut g = Graph::new();
+        g.nodes.insert(
+            NodeId("a".into()),
+            NodeSpec {
+                id: NodeId("a".into()),
+                kind: "src".into(),
+                params: Params::new(),
+            },
+        );
+        g.nodes.insert(
+            NodeId("b".into()),
+            NodeSpec {
+                id: NodeId("b".into()),
+                kind: "sink".into(),
+                params: Params::new(),
+            },
+        );
+        g.edges.insert(
+            EdgeId(1),
+            Connection {
+                from: (NodeId("a".into()), PortId("out".into())),
+                to: (NodeId("b".into()), PortId("in".into())),
+            },
+        );
+        g
+    }
+
+    #[test]
+    fn validate_tap_point_node_port_exists() {
+        let g = small_graph();
+        let p = TapPoint::node_port(NodeId("a".into()), PortId("out".into()));
+        assert_eq!(validate_tap_point(&g, &p), Ok(()));
+    }
+
+    #[test]
+    fn validate_tap_point_edge_requires_exact_edge() {
+        let g = small_graph();
+        let ok = TapPoint::edge(
+            NodeId("a".into()),
+            PortId("out".into()),
+            NodeId("b".into()),
+            PortId("in".into()),
+        );
+        assert_eq!(validate_tap_point(&g, &ok), Ok(()));
+
+        let missing = TapPoint::edge(
+            NodeId("a".into()),
+            PortId("out".into()),
+            NodeId("b".into()),
+            PortId("in2".into()),
+        );
+        assert!(matches!(
+            validate_tap_point(&g, &missing),
+            Err(TapPointValidationError::MissingEdge { .. })
+        ));
+    }
 
     #[test]
     fn tap_starts_empty() {
