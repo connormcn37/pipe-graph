@@ -350,6 +350,27 @@ impl<T> TapRegistry<T> {
         pts.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
         pts
     }
+
+    /// Validate every registered tap point against a graph.
+    ///
+    /// Returns `Ok(())` if all tap points refer to existing nodes/ports/edges.
+    /// Otherwise returns a stable list of `(point, error)` pairs.
+    pub fn validate_against(
+        &self,
+        g: &Graph,
+    ) -> Result<(), Vec<(TapPoint, TapPointValidationError)>> {
+        let mut errs: Vec<(TapPoint, TapPointValidationError)> = Vec::new();
+        for p in self.points_sorted() {
+            if let Err(e) = validate_tap_point(g, &p) {
+                errs.push((p, e));
+            }
+        }
+        if errs.is_empty() {
+            Ok(())
+        } else {
+            Err(errs)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -498,5 +519,26 @@ mod tests {
 
         t1.publish("hi");
         assert_eq!(t2.latest().map(|x| *x), Some("hi"));
+    }
+
+    #[test]
+    fn registry_validate_against_graph_reports_missing_points() {
+        let g = small_graph();
+        let r: TapRegistry<u32> = TapRegistry::new();
+
+        // ok: node+port exists
+        let _ = r.tap(NodeId("a".into()), PortId("out".into()));
+        // not ok: edge doesn't exist
+        let _ = r.tap_edge(
+            NodeId("a".into()),
+            PortId("out".into()),
+            NodeId("b".into()),
+            PortId("in2".into()),
+        );
+
+        let err = r.validate_against(&g).unwrap_err();
+        assert_eq!(err.len(), 1);
+        assert_eq!(err[0].0.to_string(), "a.out -> b.in2");
+        assert!(matches!(err[0].1, TapPointValidationError::MissingEdge { .. }));
     }
 }
