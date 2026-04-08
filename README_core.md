@@ -20,6 +20,10 @@ The plan marks which components are cyclic so an executor can run:
 - acyclic SCCs in topo order
 - cyclic SCCs with a tick/iterative scheduler
 
+Helper APIs:
+- `plan.is_cyclic_component(cid)`
+- `plan.component(cid)` (inspect nodes in an SCC)
+
 Quick usage sketch:
 
 ```rust
