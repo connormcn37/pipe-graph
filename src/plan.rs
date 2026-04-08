@@ -11,7 +11,8 @@
 use std::collections::{BTreeSet, HashMap};
 
 use crate::graph::{
-    ComponentGraph, ComponentId, Graph, GraphValidationError, GraphValidationOptions, NodeId,
+    Component, ComponentGraph, ComponentId, Graph, GraphValidationError, GraphValidationOptions,
+    NodeId,
 };
 
 #[derive(Debug, Clone)]
@@ -24,6 +25,16 @@ pub struct GraphPlan {
 }
 
 impl GraphPlan {
+    /// Get a component by id.
+    pub fn component(&self, cid: ComponentId) -> Option<&Component> {
+        self.component_graph.components.iter().find(|c| c.id == cid)
+    }
+
+    /// True if the component id is cyclic (cycle SCC or explicit self-loop).
+    pub fn is_cyclic_component(&self, cid: ComponentId) -> bool {
+        self.component(cid).map(|c| c.is_cyclic).unwrap_or(false)
+    }
+
     /// Convenience: return an acyclic execution order of node ids.
     ///
     /// This flattens `component_order` and skips cyclic components.
@@ -33,12 +44,15 @@ impl GraphPlan {
     /// - Cyclic SCCs are intentionally excluded; a tick-based scheduler should
     ///   decide how to order/iterate nodes inside them.
     pub fn acyclic_node_order(&self) -> Vec<NodeId> {
+        // Avoid O(n^2) repeated `contains()` on `cyclic_components`.
+        let cyclic: BTreeSet<ComponentId> = self.cyclic_components.iter().copied().collect();
+
         let mut out: Vec<NodeId> = Vec::new();
         for &cid in &self.component_order {
-            if self.cyclic_components.contains(&cid) {
+            if cyclic.contains(&cid) {
                 continue;
             }
-            if let Some(comp) = self.component_graph.components.iter().find(|c| c.id == cid) {
+            if let Some(comp) = self.component(cid) {
                 out.extend(comp.nodes.iter().cloned());
             }
         }
@@ -49,7 +63,7 @@ impl GraphPlan {
     pub fn cyclic_node_groups(&self) -> Vec<Vec<NodeId>> {
         let mut out: Vec<Vec<NodeId>> = Vec::new();
         for &cid in &self.cyclic_components {
-            if let Some(comp) = self.component_graph.components.iter().find(|c| c.id == cid) {
+            if let Some(comp) = self.component(cid) {
                 out.push(comp.nodes.clone());
             }
         }

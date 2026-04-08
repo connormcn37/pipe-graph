@@ -86,13 +86,7 @@ impl Executor {
     }
 
     fn is_cyclic(&self, cid: ComponentId) -> bool {
-        self.plan
-            .component_graph
-            .components
-            .iter()
-            .find(|c| c.id == cid)
-            .map(|c| c.is_cyclic)
-            .unwrap_or(false)
+        self.plan.is_cyclic_component(cid)
     }
 
     fn exec_component(&self, cid: ComponentId) {
