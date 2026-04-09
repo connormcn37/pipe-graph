@@ -35,6 +35,16 @@ impl GraphPlan {
         self.component(cid).map(|c| c.is_cyclic).unwrap_or(false)
     }
 
+    /// Convenience: return component ids in topological order, excluding cyclic SCCs.
+    pub fn acyclic_component_order(&self) -> Vec<ComponentId> {
+        let cyclic: BTreeSet<ComponentId> = self.cyclic_components.iter().copied().collect();
+        self.component_order
+            .iter()
+            .copied()
+            .filter(|cid| !cyclic.contains(cid))
+            .collect()
+    }
+
     /// Convenience: return an acyclic execution order of node ids.
     ///
     /// This flattens `component_order` and skips cyclic components.
@@ -44,14 +54,8 @@ impl GraphPlan {
     /// - Cyclic SCCs are intentionally excluded; a tick-based scheduler should
     ///   decide how to order/iterate nodes inside them.
     pub fn acyclic_node_order(&self) -> Vec<NodeId> {
-        // Avoid O(n^2) repeated `contains()` on `cyclic_components`.
-        let cyclic: BTreeSet<ComponentId> = self.cyclic_components.iter().copied().collect();
-
         let mut out: Vec<NodeId> = Vec::new();
-        for &cid in &self.component_order {
-            if cyclic.contains(&cid) {
-                continue;
-            }
+        for cid in self.acyclic_component_order() {
             if let Some(comp) = self.component(cid) {
                 out.extend(comp.nodes.iter().cloned());
             }

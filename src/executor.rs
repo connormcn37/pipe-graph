@@ -61,11 +61,7 @@ impl Executor {
     }
 
     fn run_acyclic_once(&self) {
-        for &cid in &self.plan.component_order {
-            if self.is_cyclic(cid) {
-                // Skip cyclic SCCs in one-shot mode.
-                continue;
-            }
+        for cid in self.plan.acyclic_component_order() {
             self.exec_component(cid);
         }
     }
