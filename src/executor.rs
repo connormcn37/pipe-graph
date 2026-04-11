@@ -9,8 +9,9 @@
 //! - Define a typed value model / frame model
 //! - Attach taps at node+port or edge
 
-use crate::graph::{ComponentId, Graph, GraphValidationOptions};
+use crate::graph::{ComponentId, Graph, GraphValidationOptions, NodeId};
 use crate::plan::{GraphPlan, GraphPlanError};
+use crate::tap::Tap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TickMode {
@@ -18,6 +19,17 @@ pub enum TickMode {
     Once,
     /// Execute with an explicit number of ticks; cyclic components run each tick.
     Ticks(u64),
+}
+
+/// A trace event emitted by the executor.
+///
+/// This is the first (tiny) integration point between execution and the `Tap` API.
+/// UIs can subscribe to a `Tap<ExecutionEvent>` to see what the scheduler is doing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionEvent {
+    pub tick: u64,
+    pub component: ComponentId,
+    pub node: NodeId,
 }
 
 /// An executor that owns a compiled plan.
@@ -48,36 +60,44 @@ impl Executor {
     ///
     /// This is currently a no-op skeleton that only demonstrates scheduling.
     pub fn run(&self, mode: TickMode) {
+        self.run_with_trace(mode, None)
+    }
+
+    /// Run the graph, optionally publishing a trace event for each executed node.
+    ///
+    /// The trace tap stores only the *latest* event (by design). If you want a
+    /// history, a UI layer can buffer these events itself.
+    pub fn run_with_trace(&self, mode: TickMode, trace: Option<&Tap<ExecutionEvent>>) {
         match mode {
             TickMode::Once => {
-                self.run_acyclic_once();
+                self.run_acyclic_once(0, trace);
             }
             TickMode::Ticks(n) => {
-                for _ in 0..n {
-                    self.run_tick();
+                for tick in 0..n {
+                    self.run_tick(tick, trace);
                 }
             }
         }
     }
 
-    fn run_acyclic_once(&self) {
+    fn run_acyclic_once(&self, tick: u64, trace: Option<&Tap<ExecutionEvent>>) {
         for cid in self.plan.acyclic_component_order() {
-            self.exec_component(cid);
+            self.exec_component(tick, cid, trace);
         }
     }
 
-    fn run_tick(&self) {
+    fn run_tick(&self, tick: u64, trace: Option<&Tap<ExecutionEvent>>) {
         // One reasonable default: execute acyclic SCCs in topo order each tick,
         // then execute cyclic SCCs (or vice versa). The real choice will depend
         // on dataflow semantics (push vs pull, statefulness, etc.).
         for &cid in &self.plan.component_order {
             if !self.is_cyclic(cid) {
-                self.exec_component(cid);
+                self.exec_component(tick, cid, trace);
             }
         }
 
         for &cid in &self.plan.cyclic_components {
-            self.exec_component(cid);
+            self.exec_component(tick, cid, trace);
         }
     }
 
@@ -85,7 +105,7 @@ impl Executor {
         self.plan.is_cyclic_component(cid)
     }
 
-    fn exec_component(&self, cid: ComponentId) {
+    fn exec_component(&self, tick: u64, cid: ComponentId, trace: Option<&Tap<ExecutionEvent>>) {
         // Placeholder scheduling demo: execute nodes in this SCC in a stable order.
         //
         // Notes:
@@ -94,23 +114,30 @@ impl Executor {
         //   iteration, limited inner iters, pull/push semantics, etc.). Here we
         //   just demonstrate that cycles are isolated *as SCCs* and can be run
         //   as a unit.
-        let Some(comp) = self
-            .plan
-            .component_graph
-            .components
-            .iter()
-            .find(|c| c.id == cid)
-        else {
+        let Some(comp) = self.plan.component(cid) else {
             return;
         };
 
         for nid in &comp.nodes {
-            self.exec_node(nid);
+            self.exec_node(tick, cid, nid, trace);
         }
     }
 
-    fn exec_node(&self, _nid: &crate::graph::NodeId) {
+    fn exec_node(
+        &self,
+        tick: u64,
+        cid: ComponentId,
+        nid: &NodeId,
+        trace: Option<&Tap<ExecutionEvent>>,
+    ) {
         // Placeholder. Eventually: look up processor for node kind and execute.
+        if let Some(t) = trace {
+            t.publish(ExecutionEvent {
+                tick,
+                component: cid,
+                node: nid.clone(),
+            });
+        }
     }
 }
 
@@ -118,6 +145,7 @@ impl Executor {
 mod tests {
     use super::*;
     use crate::graph::{NodeId, NodeSpec, Params, PortId};
+    use crate::tap::Tap;
 
     fn node(id: &str) -> NodeSpec {
         NodeSpec {
@@ -144,4 +172,28 @@ mod tests {
         let ex2 = Executor::compile_strict(&g).unwrap();
         assert_eq!(ex2.plan.component_graph.components.len(), 2);
     }
+
+    #[test]
+    fn executor_can_publish_trace_events_via_tap() {
+        let mut g = Graph::new();
+        g.add_node(node("a")).unwrap();
+        g.add_node(node("b")).unwrap();
+        g.connect(
+            (NodeId("a".into()), PortId("out".into())),
+            (NodeId("b".into()), PortId("in".into())),
+        )
+        .unwrap();
+
+        let ex = Executor::compile(&g, GraphValidationOptions::default()).unwrap();
+        let trace: Tap<ExecutionEvent> = Tap::new();
+
+        ex.run_with_trace(TickMode::Once, Some(&trace));
+
+        let (_, last) = trace.latest_with_seq();
+        let last = last.expect("expected at least one trace event");
+        // last executed node should be "b" (acyclic topo order)
+        assert_eq!(last.tick, 0);
+        assert_eq!(last.node, NodeId("b".into()));
+    }
 }
+
