@@ -62,7 +62,11 @@ assert_eq!(*v.unwrap(), 123);
 ```
 
 ### `TapRegistry<T>` (stable attachment points)
-Use a registry when you want “the tap for X” without explicitly passing tap handles around:
+Use a registry when you want “the tap for X” without explicitly passing tap handles around.
+
+There are two convenient ways to address tap points:
+- strongly-typed (`TapPoint` / `NodeId` / `PortId`)
+- string form (`"node.port"` or `"a.out -> b.in"`), via `tap_at_str()`
 
 ```rust
 use pipe_graph::tap::{TapPoint, TapRegistry};

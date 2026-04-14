@@ -312,6 +312,16 @@ impl<T> TapRegistry<T> {
         g.entry(point).or_insert_with(Tap::new).clone()
     }
 
+    /// Parse a `TapPoint` from a string and get (or create) its tap.
+    ///
+    /// Supported formats:
+    /// - `node.port`
+    /// - `from_node.from_port -> to_node.to_port`
+    pub fn tap_at_str(&self, s: &str) -> Result<Tap<T>, TapPointParseError> {
+        let p: TapPoint = s.parse()?;
+        Ok(self.tap_at(p))
+    }
+
     /// Convenience: tap a `(node, port)`.
     pub fn tap(&self, node: NodeId, port: PortId) -> Tap<T> {
         self.tap_at(TapPoint::node_port(node, port))
@@ -333,6 +343,12 @@ impl<T> TapRegistry<T> {
             .lock()
             .expect("tap registry mutex poisoned")
             .remove(point)
+    }
+
+    /// Parse a `TapPoint` from a string and remove it from the registry.
+    pub fn remove_str(&self, s: &str) -> Result<Option<Tap<T>>, TapPointParseError> {
+        let p: TapPoint = s.parse()?;
+        Ok(self.remove(&p))
     }
 
     pub fn points(&self) -> Vec<TapPoint> {
@@ -498,6 +514,28 @@ mod tests {
 
         a1.publish(7);
         assert_eq!(*a2.latest().unwrap(), 7);
+    }
+
+    #[test]
+    fn registry_can_create_taps_from_strings() {
+        let r: TapRegistry<u32> = TapRegistry::new();
+
+        let t1 = r.tap_at_str("a.out").unwrap();
+        let t2 = r.tap_at_str("a.out").unwrap();
+
+        t1.publish(9);
+        assert_eq!(*t2.latest().unwrap(), 9);
+
+        let e1 = r.tap_at_str("a.out -> b.in").unwrap();
+        let e2 = r.tap_edge(
+            NodeId("a".into()),
+            PortId("out".into()),
+            NodeId("b".into()),
+            PortId("in".into()),
+        );
+
+        e1.publish(11);
+        assert_eq!(*e2.latest().unwrap(), 11);
     }
 
     #[test]
