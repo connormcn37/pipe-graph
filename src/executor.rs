@@ -9,9 +9,9 @@
 //! - Define a typed value model / frame model
 //! - Attach taps at node+port or edge
 
-use crate::graph::{ComponentId, Graph, GraphValidationOptions, NodeId};
+use crate::graph::{ComponentId, Graph, GraphValidationOptions, NodeId, PortId};
 use crate::plan::{GraphPlan, GraphPlanError};
-use crate::tap::Tap;
+use crate::tap::{Tap, TapPoint, TapRegistry};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TickMode {
@@ -30,6 +30,14 @@ pub struct ExecutionEvent {
     pub tick: u64,
     pub component: ComponentId,
     pub node: NodeId,
+}
+
+/// Stable tap point used for executor trace events.
+///
+/// This is intentionally a reserved/"system" node id so UIs can attach without
+/// needing to know any user graph node ids.
+pub fn executor_trace_point() -> TapPoint {
+    TapPoint::node_port(NodeId("__executor".into()), PortId("trace".into()))
 }
 
 /// An executor that owns a compiled plan.
@@ -78,6 +86,16 @@ impl Executor {
                 }
             }
         }
+    }
+
+    /// Run the graph and publish trace events into a [`TapRegistry`].
+    ///
+    /// This gives UIs a stable attachment point without passing tap handles:
+    ///
+    /// - tap point: `__executor.trace` (see [`executor_trace_point`])
+    pub fn run_with_registry(&self, mode: TickMode, reg: &TapRegistry<ExecutionEvent>) {
+        let t = reg.tap_at(executor_trace_point());
+        self.run_with_trace(mode, Some(&t));
     }
 
     fn run_acyclic_once(&self, tick: u64, trace: Option<&Tap<ExecutionEvent>>) {
@@ -145,7 +163,7 @@ impl Executor {
 mod tests {
     use super::*;
     use crate::graph::{NodeId, NodeSpec, Params, PortId};
-    use crate::tap::Tap;
+    use crate::tap::{Tap, TapRegistry};
 
     fn node(id: &str) -> NodeSpec {
         NodeSpec {
@@ -193,6 +211,28 @@ mod tests {
         let last = last.expect("expected at least one trace event");
         // last executed node should be "b" (acyclic topo order)
         assert_eq!(last.tick, 0);
+        assert_eq!(last.node, NodeId("b".into()));
+    }
+
+    #[test]
+    fn executor_can_publish_trace_events_via_registry() {
+        let mut g = Graph::new();
+        g.add_node(node("a")).unwrap();
+        g.add_node(node("b")).unwrap();
+        g.connect(
+            (NodeId("a".into()), PortId("out".into())),
+            (NodeId("b".into()), PortId("in".into())),
+        )
+        .unwrap();
+
+        let ex = Executor::compile(&g, GraphValidationOptions::default()).unwrap();
+        let reg: TapRegistry<ExecutionEvent> = TapRegistry::new();
+
+        ex.run_with_registry(TickMode::Once, &reg);
+
+        let t = reg.tap_at(executor_trace_point());
+        let (_, last) = t.latest_with_seq();
+        let last = last.expect("expected at least one trace event");
         assert_eq!(last.node, NodeId("b".into()));
     }
 }

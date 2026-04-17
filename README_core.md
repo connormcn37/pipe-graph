@@ -41,6 +41,12 @@ let cycles = plan.cyclic_node_groups();
 ## Tap API (latest-value)
 A **tap** is a lightweight way to observe values flowing through the graph without blocking producers.
 
+### Executor trace tap (first external-ish tap surface)
+The executor can publish scheduler trace events into a `TapRegistry<ExecutionEvent>` at a stable point:
+- `__executor.trace`
+
+See `Executor::run_with_registry()` + `executor_trace_point()`.
+
 Also see `src/bin/tap_demo.rs` for a runnable example (node+port tap + edge tap).
 
 ### `Tap<T>` (latest + sequence)
