@@ -79,6 +79,8 @@ pub enum GraphError {
 pub enum GraphValidationError {
     /// A node id is empty ("" after trimming).
     EmptyNodeId { node: NodeId },
+    /// A node id contains a dot (`.`), which is reserved for `TapPoint` string form (`node.port`).
+    DotInNodeId { node: NodeId },
     /// A node kind is empty ("" after trimming).
     EmptyNodeKind { node: NodeId },
     /// An edge references a node id that does not exist.
@@ -87,6 +89,8 @@ pub enum GraphValidationError {
     CyclicComponent { nodes: Vec<NodeId> },
     /// An edge references an empty port id ("" after trimming).
     MissingPort { node: NodeId, port: PortId },
+    /// A port id contains a dot (`.`), which is reserved for `TapPoint` string form (`node.port`).
+    DotInPortId { node: NodeId, port: PortId },
     /// An edge connects a node+port to itself.
     SelfLoop { node: NodeId, port: PortId },
     /// Two edges have identical endpoints (from,to).
@@ -104,6 +108,12 @@ pub enum GraphValidationError {
 pub struct GraphValidationOptions {
     /// If true, a node must appear in at least one edge (in or out).
     pub require_all_nodes_connected: bool,
+
+    /// If true, disallow `.` in node ids and port ids.
+    ///
+    /// Rationale: the tap string format uses `node.port` and `a.out -> b.in`.
+    pub disallow_dots_in_ids: bool,
+
     /// If true, disallow edges that connect a port to itself.
     pub disallow_self_loops: bool,
     /// If true, disallow multiple inbound edges to the same input port.
@@ -119,6 +129,7 @@ impl Default for GraphValidationOptions {
     fn default() -> Self {
         Self {
             require_all_nodes_connected: false,
+            disallow_dots_in_ids: false,
             disallow_self_loops: false,
             disallow_multiple_inbound_to_port: false,
             disallow_cycles: false,
@@ -131,6 +142,7 @@ impl GraphValidationOptions {
     pub fn strict() -> Self {
         Self {
             require_all_nodes_connected: true,
+            disallow_dots_in_ids: true,
             disallow_self_loops: true,
             disallow_multiple_inbound_to_port: true,
             disallow_cycles: false,
@@ -162,6 +174,11 @@ impl Graph {
         for spec in self.nodes.values() {
             if spec.id.0.trim().is_empty() {
                 errs.push(GraphValidationError::EmptyNodeId {
+                    node: spec.id.clone(),
+                });
+            }
+            if opts.disallow_dots_in_ids && spec.id.0.contains('.') {
+                errs.push(GraphValidationError::DotInNodeId {
                     node: spec.id.clone(),
                 });
             }
@@ -201,6 +218,21 @@ impl Graph {
                     node: conn.to.0.clone(),
                     port: conn.to.1.clone(),
                 });
+            }
+
+            if opts.disallow_dots_in_ids {
+                if conn.from.1.0.contains('.') {
+                    errs.push(GraphValidationError::DotInPortId {
+                        node: conn.from.0.clone(),
+                        port: conn.from.1.clone(),
+                    });
+                }
+                if conn.to.1.0.contains('.') {
+                    errs.push(GraphValidationError::DotInPortId {
+                        node: conn.to.0.clone(),
+                        port: conn.to.1.clone(),
+                    });
+                }
             }
 
             // Self-loop checks.
@@ -498,8 +530,7 @@ mod tests {
         g.validate(GraphValidationOptions {
             require_all_nodes_connected: true,
             disallow_self_loops: true,
-            disallow_multiple_inbound_to_port: false,
-            disallow_cycles: false,
+            ..GraphValidationOptions::default()
         })
         .unwrap();
     }
@@ -508,6 +539,7 @@ mod tests {
     fn strict_options_enable_common_ui_invariants() {
         let opts = GraphValidationOptions::strict();
         assert!(opts.require_all_nodes_connected);
+        assert!(opts.disallow_dots_in_ids);
         assert!(opts.disallow_self_loops);
         assert!(opts.disallow_multiple_inbound_to_port);
         assert!(!opts.disallow_cycles);
@@ -541,6 +573,39 @@ mod tests {
             errs.iter()
                 .any(|e| matches!(e, GraphValidationError::EmptyNodeKind { .. }))
         );
+    }
+
+    #[test]
+    fn validate_reports_dot_in_node_or_port_when_enabled() {
+        let mut g = Graph::new();
+        g.add_node(NodeSpec {
+            id: NodeId("a.b".into()),
+            kind: "noop".into(),
+            params: Params::default(),
+        })
+        .unwrap();
+        g.add_node(node("c")).unwrap();
+
+        // Port with dot.
+        g.connect(
+            (NodeId("a.b".into()), PortId("out.v".into())),
+            (NodeId("c".into()), PortId("in".into())),
+        )
+        .unwrap();
+
+        let errs = g
+            .validate(GraphValidationOptions {
+                disallow_dots_in_ids: true,
+                ..GraphValidationOptions::default()
+            })
+            .unwrap_err();
+
+        assert!(errs
+            .iter()
+            .any(|e| matches!(e, GraphValidationError::DotInNodeId { .. })));
+        assert!(errs
+            .iter()
+            .any(|e| matches!(e, GraphValidationError::DotInPortId { .. })));
     }
 
     #[test]
@@ -638,9 +703,7 @@ mod tests {
         let errs = g
             .validate(GraphValidationOptions {
                 require_all_nodes_connected: true,
-                disallow_self_loops: false,
-                disallow_multiple_inbound_to_port: false,
-                disallow_cycles: false,
+                ..GraphValidationOptions::default()
             })
             .unwrap_err();
         assert!(
@@ -662,10 +725,8 @@ mod tests {
 
         let errs = g
             .validate(GraphValidationOptions {
-                require_all_nodes_connected: false,
                 disallow_self_loops: true,
-                disallow_multiple_inbound_to_port: false,
-                disallow_cycles: false,
+                ..GraphValidationOptions::default()
             })
             .unwrap_err();
         assert!(

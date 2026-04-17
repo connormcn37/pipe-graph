@@ -9,6 +9,7 @@ Use `Graph::validate(opts)` (or `Graph::validate_strict()`) to catch structural 
 - duplicate edges
 - optional: require every node has at least one incident edge
 - optional: disallow exact self-loop edges
+- optional: disallow `.` in node/port ids (reserved for tap string form like `node.port`)
 
 ## Cycles: SCC decomposition
 Cycles are expected (feedback loops). Use:
