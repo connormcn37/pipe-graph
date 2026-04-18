@@ -10,6 +10,7 @@ Use `Graph::validate(opts)` (or `Graph::validate_strict()`) to catch structural 
 - optional: require every node has at least one incident edge
 - optional: disallow exact self-loop edges
 - optional: disallow `.` in node/port ids (reserved for tap string form like `node.port`)
+- optional: reserve ids starting with `__` for runtime/system use (e.g. `__executor.trace`)
 
 ## Cycles: SCC decomposition
 Cycles are expected (feedback loops). Use:

@@ -81,6 +81,8 @@ pub enum GraphValidationError {
     EmptyNodeId { node: NodeId },
     /// A node id contains a dot (`.`), which is reserved for `TapPoint` string form (`node.port`).
     DotInNodeId { node: NodeId },
+    /// A node id starts with `__`, which is reserved for system/runtime use.
+    ReservedNodeId { node: NodeId },
     /// A node kind is empty ("" after trimming).
     EmptyNodeKind { node: NodeId },
     /// An edge references a node id that does not exist.
@@ -91,6 +93,8 @@ pub enum GraphValidationError {
     MissingPort { node: NodeId, port: PortId },
     /// A port id contains a dot (`.`), which is reserved for `TapPoint` string form (`node.port`).
     DotInPortId { node: NodeId, port: PortId },
+    /// A port id starts with `__`, which is reserved for system/runtime use.
+    ReservedPortId { node: NodeId, port: PortId },
     /// An edge connects a node+port to itself.
     SelfLoop { node: NodeId, port: PortId },
     /// Two edges have identical endpoints (from,to).
@@ -114,6 +118,12 @@ pub struct GraphValidationOptions {
     /// Rationale: the tap string format uses `node.port` and `a.out -> b.in`.
     pub disallow_dots_in_ids: bool,
 
+    /// If true, disallow node/port ids starting with `__`.
+    ///
+    /// Rationale: reserve a namespace for runtime/system identifiers
+    /// (e.g. `__executor.trace`).
+    pub disallow_reserved_prefix: bool,
+
     /// If true, disallow edges that connect a port to itself.
     pub disallow_self_loops: bool,
     /// If true, disallow multiple inbound edges to the same input port.
@@ -130,6 +140,7 @@ impl Default for GraphValidationOptions {
         Self {
             require_all_nodes_connected: false,
             disallow_dots_in_ids: false,
+            disallow_reserved_prefix: false,
             disallow_self_loops: false,
             disallow_multiple_inbound_to_port: false,
             disallow_cycles: false,
@@ -143,6 +154,7 @@ impl GraphValidationOptions {
         Self {
             require_all_nodes_connected: true,
             disallow_dots_in_ids: true,
+            disallow_reserved_prefix: true,
             disallow_self_loops: true,
             disallow_multiple_inbound_to_port: true,
             disallow_cycles: false,
@@ -179,6 +191,11 @@ impl Graph {
             }
             if opts.disallow_dots_in_ids && spec.id.0.contains('.') {
                 errs.push(GraphValidationError::DotInNodeId {
+                    node: spec.id.clone(),
+                });
+            }
+            if opts.disallow_reserved_prefix && spec.id.0.starts_with("__") {
+                errs.push(GraphValidationError::ReservedNodeId {
                     node: spec.id.clone(),
                 });
             }
@@ -229,6 +246,21 @@ impl Graph {
                 }
                 if conn.to.1.0.contains('.') {
                     errs.push(GraphValidationError::DotInPortId {
+                        node: conn.to.0.clone(),
+                        port: conn.to.1.clone(),
+                    });
+                }
+            }
+
+            if opts.disallow_reserved_prefix {
+                if conn.from.1.0.starts_with("__") {
+                    errs.push(GraphValidationError::ReservedPortId {
+                        node: conn.from.0.clone(),
+                        port: conn.from.1.clone(),
+                    });
+                }
+                if conn.to.1.0.starts_with("__") {
+                    errs.push(GraphValidationError::ReservedPortId {
                         node: conn.to.0.clone(),
                         port: conn.to.1.clone(),
                     });
@@ -540,6 +572,7 @@ mod tests {
         let opts = GraphValidationOptions::strict();
         assert!(opts.require_all_nodes_connected);
         assert!(opts.disallow_dots_in_ids);
+        assert!(opts.disallow_reserved_prefix);
         assert!(opts.disallow_self_loops);
         assert!(opts.disallow_multiple_inbound_to_port);
         assert!(!opts.disallow_cycles);
@@ -606,6 +639,38 @@ mod tests {
         assert!(errs
             .iter()
             .any(|e| matches!(e, GraphValidationError::DotInPortId { .. })));
+    }
+
+    #[test]
+    fn validate_reports_reserved_prefix_when_enabled() {
+        let mut g = Graph::new();
+        g.add_node(NodeSpec {
+            id: NodeId("__sys".into()),
+            kind: "noop".into(),
+            params: Params::default(),
+        })
+        .unwrap();
+        g.add_node(node("c")).unwrap();
+
+        g.connect(
+            (NodeId("__sys".into()), PortId("__out".into())),
+            (NodeId("c".into()), PortId("in".into())),
+        )
+        .unwrap();
+
+        let errs = g
+            .validate(GraphValidationOptions {
+                disallow_reserved_prefix: true,
+                ..GraphValidationOptions::default()
+            })
+            .unwrap_err();
+
+        assert!(errs
+            .iter()
+            .any(|e| matches!(e, GraphValidationError::ReservedNodeId { .. })));
+        assert!(errs
+            .iter()
+            .any(|e| matches!(e, GraphValidationError::ReservedPortId { .. })));
     }
 
     #[test]
