@@ -50,6 +50,26 @@ See `Executor::run_with_registry()` + `executor_trace_point()`.
 
 Also see `src/bin/tap_demo.rs` for a runnable example (node+port tap + edge tap).
 
+### Minimal runnable tap attachment (string form)
+If you’re building a UI/debugger, string points are convenient:
+
+```rust
+use pipe_graph::tap::TapRegistry;
+
+let taps: TapRegistry<String> = TapRegistry::new();
+
+// node tap
+let t = taps.tap_at_str("node_a.out").unwrap();
+t.publish("hello".to_string());
+
+// edge tap
+let e = taps.tap_at_str("node_a.out -> node_b.in").unwrap();
+e.publish("preview".to_string());
+```
+
+Tip: call `TapRegistry::validate_against(&graph)` to catch taps that reference
+nonexistent nodes/ports/edges before execution.
+
 ### `Tap<T>` (latest + sequence)
 `Tap<T>` stores only the latest published value (and a monotonic seq counter):
 
