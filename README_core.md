@@ -70,6 +70,28 @@ e.publish("preview".to_string());
 Tip: call `TapRegistry::validate_against(&graph)` to catch taps that reference
 nonexistent nodes/ports/edges before execution.
 
+### Minimal executor trace tap (scheduler introspection)
+The executor can publish a tiny stream of “what just ran” events into a stable
+reserved tap point:
+
+- tap point: `__executor.trace`
+
+```rust
+use pipe_graph::executor::{Executor, TickMode};
+use pipe_graph::graph::{Graph, GraphValidationOptions};
+use pipe_graph::tap::TapRegistry;
+
+let g = Graph::new();
+let ex = Executor::compile(&g, GraphValidationOptions::default()).unwrap();
+
+let reg: TapRegistry<pipe_graph::executor::ExecutionEvent> = TapRegistry::new();
+ex.run_with_registry(TickMode::Once, &reg);
+
+let t = reg.tap_at_str("__executor.trace").unwrap();
+let (_seq, ev) = t.latest_with_seq();
+// ev is the latest published ExecutionEvent (if any)
+```
+
 ### `Tap<T>` (latest + sequence)
 `Tap<T>` stores only the latest published value (and a monotonic seq counter):
 
