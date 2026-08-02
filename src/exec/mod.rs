@@ -1,6 +1,13 @@
 //! Execution layer: turns the topology in [`crate::graph`] into something that
-//! runs. This module owns the node abstraction (ports + evaluation) and, in
-//! later phases, the registry, buffers, and scheduler.
+//! runs. This module owns the node abstraction (ports + evaluation), the
+//! registry that maps `kind` strings to nodes, and graph validation; later
+//! phases add buffers and the scheduler.
 
 mod node;
 pub use self::node::*;
+
+mod registry;
+pub use self::registry::*;
+
+mod validate;
+pub use self::validate::*;
