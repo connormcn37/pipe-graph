@@ -1,10 +1,10 @@
 use pipe_graph::{data, processors, traits::Processor};
 
 fn main() {
-    let mut frame = data::Frame {
-        width: 3,
-        height: 3,
-        pixels: vec![
+    let mut frame = data::Frame::from_rgb8(
+        3,
+        3,
+        vec![
             (255, 0, 0),
             (0, 255, 0),
             (0, 0, 255),
@@ -15,7 +15,7 @@ fn main() {
             (128, 128, 128),
             (64, 64, 64),
         ],
-    };
+    );
 
     println!("Original Frame: {:?}", frame);
     let mut processor_list = processors::ProcessList::new();

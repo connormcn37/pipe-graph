@@ -34,10 +34,10 @@ mod tests {
     /// silently change behavior.
     #[test]
     fn nested_demo_clears_all_channels() {
-        let mut frame = Frame {
-            width: 3,
-            height: 3,
-            pixels: vec![
+        let mut frame = Frame::from_rgb8(
+            3,
+            3,
+            vec![
                 (255, 0, 0),
                 (0, 255, 0),
                 (0, 0, 255),
@@ -48,7 +48,7 @@ mod tests {
                 (128, 128, 128),
                 (64, 64, 64),
             ],
-        };
+        );
 
         let mut inner = ProcessList::new();
         inner.add_processor(ClearChannel(Channel::Red));
@@ -60,17 +60,13 @@ mod tests {
 
         outer.process(&mut frame);
 
-        assert!(frame.pixels.iter().all(|&p| p == (0, 0, 0)));
+        assert!(frame.to_rgb8().iter().all(|&p| p == (0, 0, 0)));
     }
 
     #[test]
     fn empty_list_is_identity() {
-        let mut frame = Frame {
-            width: 1,
-            height: 1,
-            pixels: vec![(10, 20, 30)],
-        };
+        let mut frame = Frame::from_rgb8(1, 1, vec![(10, 20, 30)]);
         ProcessList::new().process(&mut frame);
-        assert_eq!(frame.pixels, vec![(10, 20, 30)]);
+        assert_eq!(frame.to_rgb8(), vec![(10, 20, 30)]);
     }
 }
