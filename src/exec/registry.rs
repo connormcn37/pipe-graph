@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use crate::exec::{Node, PortSet, ProcessorNode};
 use crate::graph::{NodeSpec, Params};
 use crate::processors::{Channel, ClearChannel};
+use crate::stages::{CastStage, CropStage, MergeStage, SplitStage};
 
 /// Errors raised while constructing a node from its spec.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +148,19 @@ pub fn builtin_registry() -> Registry {
             }
         };
         Ok(Box::new(ProcessorNode::new(ClearChannel(ch))) as Box<dyn Node>)
+    });
+
+    reg.register("crop", |p| {
+        Ok(Box::new(CropStage::try_from(p)?) as Box<dyn Node>)
+    });
+    reg.register("cast", |p| {
+        Ok(Box::new(CastStage::try_from(p)?) as Box<dyn Node>)
+    });
+    reg.register("split", |p| {
+        Ok(Box::new(SplitStage::try_from(p)?) as Box<dyn Node>)
+    });
+    reg.register("merge", |p| {
+        Ok(Box::new(MergeStage::try_from(p)?) as Box<dyn Node>)
     });
 
     reg
