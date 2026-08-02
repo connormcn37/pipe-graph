@@ -17,6 +17,12 @@ pub struct NodeId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PortId(pub String);
 
+impl std::borrow::Borrow<str> for PortId {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EdgeId(pub u64);
 

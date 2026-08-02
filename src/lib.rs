@@ -18,4 +18,5 @@ pub mod processors;
 pub mod systems;
 pub mod traits;
 
+pub mod exec;
 pub mod graph;
