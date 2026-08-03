@@ -183,3 +183,29 @@ fn missing_source_input_surfaces_as_run_error() {
     assert_eq!(err.node, id("a"));
     assert_eq!(err.error, NodeError::MissingInput("in".to_string()));
 }
+
+#[test]
+fn tap_observes_latest_output_without_blocking() {
+    // A self-loop counter, one iteration per run_once.
+    let mut g = Graph::new();
+    g.add_node(node("k", "counter", &[])).unwrap();
+    g.connect(port("k", "out"), port("k", "prev")).unwrap();
+
+    let mut reg = Registry::new();
+    reg.register("counter", |_| Ok(Box::new(Counter) as Box<dyn Node>));
+
+    let mut rt = Runtime::instantiate(&g, &reg).unwrap();
+    rt.set_max_iters(1);
+    let tap = rt.add_tap(&id("k"), "out");
+    rt.reset();
+
+    // Run three ticks without reading the tap in between; latest-value wins.
+    rt.tick(3).unwrap();
+    assert_eq!(tap.latest().unwrap().as_scalar(), Some(3.0));
+
+    // The tap also matches the runtime's captured output.
+    assert_eq!(
+        rt.output(&id("k"), "out").unwrap().as_scalar(),
+        tap.latest().unwrap().as_scalar()
+    );
+}

@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use crate::data::Payload;
 use crate::exec::{
-    BuildError, EdgeBuffer, Inputs, Node, Outputs, Registry, ValidationError, validate,
+    BuildError, EdgeBuffer, Inputs, Node, Outputs, Registry, Tap, ValidationError, validate,
 };
 use crate::graph::{EdgeId, Graph, NodeId, PortId};
 
@@ -206,6 +206,8 @@ pub struct Runtime {
     external: HashMap<NodeId, HashMap<PortId, Arc<Payload>>>,
     /// Last outputs produced by each node (an always-on tap; read via `output`).
     node_outputs: HashMap<NodeId, HashMap<PortId, Arc<Payload>>>,
+    /// Live-preview taps registered on (node, output-port) pairs.
+    taps: HashMap<(NodeId, PortId), Vec<Tap>>,
     max_iters: u32,
 }
 
@@ -251,6 +253,7 @@ impl Runtime {
             outgoing,
             external: HashMap::new(),
             node_outputs: HashMap::new(),
+            taps: HashMap::new(),
             max_iters: DEFAULT_MAX_ITERS,
         })
     }
@@ -283,12 +286,30 @@ impl Runtime {
         self.node_outputs.get(node)?.get(port).cloned()
     }
 
+    /// Attach a non-blocking live-preview tap to a node's output `port`.
+    ///
+    /// Returns a cloneable [`Tap`] handle that always reflects the latest value
+    /// produced on that port. Multiple taps may observe the same port.
+    pub fn add_tap(&mut self, node: &NodeId, port: &str) -> Tap {
+        let tap = Tap::new();
+        self.taps
+            .entry((node.clone(), PortId(port.to_string())))
+            .or_default()
+            .push(tap.clone());
+        tap
+    }
+
     /// Clear all edge buffers and captured outputs, and reset node state.
     pub fn reset(&mut self) {
         for e in &mut self.edges {
             e.buffer.clear();
         }
         self.node_outputs.clear();
+        for taps in self.taps.values() {
+            for tap in taps {
+                tap.clear();
+            }
+        }
         for node in self.nodes.values_mut() {
             node.reset();
         }
@@ -380,6 +401,17 @@ impl Runtime {
             let port = self.edges[i].from.1.clone();
             if let Some(shared) = arced.get(&port) {
                 self.edges[i].buffer.push_arc(shared.clone());
+            }
+        }
+
+        // Publish to any live-preview taps (non-blocking: a quick lock+store).
+        if !self.taps.is_empty() {
+            for (port, shared) in &arced {
+                if let Some(taps) = self.taps.get(&(id.clone(), port.clone())) {
+                    for tap in taps {
+                        tap.publish(shared.clone());
+                    }
+                }
             }
         }
 

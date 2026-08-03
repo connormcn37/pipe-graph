@@ -15,5 +15,8 @@ pub use self::registry::*;
 mod schedule;
 pub use self::schedule::*;
 
+mod tap;
+pub use self::tap::*;
+
 mod validate;
 pub use self::validate::*;
