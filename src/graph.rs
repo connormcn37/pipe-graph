@@ -17,6 +17,12 @@ pub struct NodeId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PortId(pub String);
 
+impl std::borrow::Borrow<str> for PortId {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EdgeId(pub u64);
 
@@ -84,6 +90,20 @@ impl Graph {
         self.next_edge_id += 1;
         self.edges.insert(id.clone(), Connection { from, to });
         Ok(id)
+    }
+
+    /// Remove a node and every edge touching it. Returns whether the node
+    /// existed. Needed by a live editor (and by graph re-compilation).
+    pub fn remove_node(&mut self, id: &NodeId) -> bool {
+        let existed = self.nodes.remove(id).is_some();
+        self.edges
+            .retain(|_, conn| &conn.from.0 != id && &conn.to.0 != id);
+        existed
+    }
+
+    /// Remove a single edge by id. Returns whether it existed.
+    pub fn disconnect(&mut self, edge: &EdgeId) -> bool {
+        self.edges.remove(edge).is_some()
     }
 
     /// Returns a set of node ids referenced by edges but missing from `nodes`.
