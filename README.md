@@ -53,8 +53,13 @@ Bevy); UI frontends adapt to it. The pieces:
     parts with a bounded tick loop (feedback edges read the previous tick).
   - `Tap` — non-blocking latest-value previews on any output port.
 - **`stages`** — `CropStage`, `CastStage`, `SplitStage`, `MergeStage` as `Node`s.
-- **`systems`** (Bevy-only, feature-gated) — editor experiments; being reworked
-  into a thin view over the core graph.
+- **`editor`** — Bevy-free controller logic: `EditorCommand`/`apply_command`
+  (route user intents through the core `Graph`) and `view_diff` (which node
+  views a frontend should spawn/despawn to mirror the graph).
+- **`systems`** (Bevy-only, feature-gated) — a thin view/controller:
+  `PipeGraphEditorPlugin` holds the `Graph` in a `GraphResource`, applies queued
+  `EditorCommand`s, and syncs `NodeView` entities to match. The core never
+  depends on Bevy; ECS entities are views, not the data model.
 
 Realizing the vision above: an `Entity`'s `label` is a `NodeId`; its `inputs` /
 `connect` / `disconnect` are core `Graph` operations; a `Stage`'s `parameters`

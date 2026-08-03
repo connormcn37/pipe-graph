@@ -31,26 +31,9 @@ fn main() {
 
     graph_runtime_demo();
 
-    // use bevy::prelude::*;
-
-    // let mut app = App::new();
-
-    // app.add_plugins(DefaultPlugins);
-
-    // app.add_systems(Startup, setup);
-
-    // app.add_systems(
-    //     Update,
-    //     (
-    //         handle_crop_stage,
-    //         handle_cast_stage,
-    //         handle_split_stage,
-    //         handle_merge_stage,
-    //     )
-    //         .chain(),
-    // );
-
-    // app.run();
+    // The Bevy editor lives behind `--features bevy` as a thin view over the
+    // core graph; see `pipe_graph::systems::PipeGraphEditorPlugin`. It is not
+    // launched here so the default binary stays headless.
 }
 
 /// Demonstrates the node-graph runtime: describe a graph declaratively, then
@@ -116,35 +99,4 @@ fn graph_runtime_demo() {
     println!("  input : {:?}", source.data());
     println!("  output: {:?}", output.data());
     println!("  round-trip ok: {}", output == &source);
-}
-
-#[cfg(feature = "bevy")]
-#[allow(dead_code)] // wired up in Phase 8 (Bevy editor); kept as scaffold
-fn setup(mut commands: bevy::prelude::Commands) {
-    commands.spawn((
-        data::Object {
-            id: "A".to_string(),
-        },
-        data::Stage {
-            parameters: std::collections::HashMap::new(),
-        },
-        data::Crop,
-    ));
-
-    commands.spawn((
-        data::Object {
-            id: "B - won't show up because no Stage attached".to_string(),
-        },
-        data::Cast,
-    ));
-
-    let mut parameters = std::collections::HashMap::new();
-    parameters.insert("key".to_string(), "value".to_string());
-    commands.spawn((
-        data::Object {
-            id: "C".to_string(),
-        },
-        data::Stage { parameters },
-        data::Split,
-    ));
 }
