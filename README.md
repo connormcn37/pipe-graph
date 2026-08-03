@@ -28,4 +28,45 @@ A `Pipeline` is an `Entity` that can be initialized by giving a list of stage ty
   - `start()`: orchestrates the stages data processing sequentially 
   - `stop()`: stop processing.
 
+## Architecture (current implementation)
+
+The core is a **data-agnostic, headless runtime** (`default` build pulls in no
+Bevy); UI frontends adapt to it. The pieces:
+
+- **`data`** — `Frame` is a channel/dtype-generic interleaved buffer (`u8`/`f32`,
+  any channel count); `Payload` (`Frame` | `Scalar` | `Bytes`) is what flows
+  along edges. `from_rgb8`/`to_rgb8` bridge the simple RGB case.
+- **`graph`** — pure topology: `Graph` of `NodeSpec { id, kind, params }` and
+  `Connection`s between named `(node, port)` endpoints. Cycles are allowed
+  (feedback loops). Dependency-light; the editor mirrors these types.
+- **`traits::Processor`** — the original single-in/single-out `&mut Frame`
+  transform (e.g. `ClearChannel`, `ProcessList`), still supported.
+- **`exec`** — the execution layer:
+  - `Node` — the real execution unit: named N-in/M-out ports (`ports()`) and
+    `eval(inputs) -> outputs`. `ProcessorNode<P>` adapts any `Processor` into a
+    1-in/1-out node for free.
+  - `Registry` — maps a node's `kind` string to a constructor, parsing
+    `params` into typed config; `validate()` checks ports and payload kinds.
+  - `EdgeBuffer` — where a payload lives between nodes (pull-based, `Arc`-shared).
+  - `Runtime` / `compile()` — decomposes the graph into strongly-connected
+    components (Tarjan), runs acyclic parts in topological order and cyclic
+    parts with a bounded tick loop (feedback edges read the previous tick).
+  - `Tap` — non-blocking latest-value previews on any output port.
+- **`stages`** — `CropStage`, `CastStage`, `SplitStage`, `MergeStage` as `Node`s.
+- **`systems`** (Bevy-only, feature-gated) — editor experiments; being reworked
+  into a thin view over the core graph.
+
+Realizing the vision above: an `Entity`'s `label` is a `NodeId`; its `inputs` /
+`connect` / `disconnect` are core `Graph` operations; a `Stage`'s `parameters`
+are `NodeSpec.params`; `get_last_frame` / `push_frame` are now
+`EdgeBuffer::get_last` / `push`; and a `Pipeline` is a `Graph` executed by a
+`Runtime`.
+
+### Try it
+
+```sh
+cargo run                       # runs the processor demo + a split->merge graph
+cargo test                      # headless test suite
+cargo test --features bevy      # also compile/run the Bevy-gated code
 ```
+
