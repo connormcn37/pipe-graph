@@ -119,6 +119,7 @@ fn graph_runtime_demo() {
 }
 
 #[cfg(feature = "bevy")]
+#[allow(dead_code)] // wired up in Phase 8 (Bevy editor); kept as scaffold
 fn setup(mut commands: bevy::prelude::Commands) {
     commands.spawn((
         data::Object {
