@@ -3,6 +3,9 @@
 //! registry that maps `kind` strings to nodes, and graph validation; later
 //! phases add buffers and the scheduler.
 
+mod buffer;
+pub use self::buffer::*;
+
 mod node;
 pub use self::node::*;
 
