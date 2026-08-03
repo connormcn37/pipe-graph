@@ -12,5 +12,8 @@ pub use self::node::*;
 mod registry;
 pub use self::registry::*;
 
+mod schedule;
+pub use self::schedule::*;
+
 mod validate;
 pub use self::validate::*;

@@ -82,6 +82,35 @@ fn cycles_are_permitted() {
 }
 
 #[test]
+fn remove_node_drops_touching_edges() {
+    let mut g = Graph::new();
+    g.add_node(node("a", "k")).unwrap();
+    g.add_node(node("b", "k")).unwrap();
+    g.add_node(node("c", "k")).unwrap();
+    g.connect(port("a", "out"), port("b", "in")).unwrap();
+    g.connect(port("b", "out"), port("c", "in")).unwrap();
+
+    assert!(g.remove_node(&NodeId("b".to_string())));
+    assert_eq!(g.nodes.len(), 2);
+    // Both edges touched b, so both are gone.
+    assert!(g.edges.is_empty());
+    // Removing again is a no-op.
+    assert!(!g.remove_node(&NodeId("b".to_string())));
+}
+
+#[test]
+fn disconnect_removes_single_edge() {
+    let mut g = Graph::new();
+    g.add_node(node("a", "k")).unwrap();
+    g.add_node(node("b", "k")).unwrap();
+    let e = g.connect(port("a", "out"), port("b", "in")).unwrap();
+
+    assert!(g.disconnect(&e));
+    assert!(g.edges.is_empty());
+    assert!(!g.disconnect(&e));
+}
+
+#[test]
 fn edges_get_distinct_ids() {
     let mut g = Graph::new();
     g.add_node(node("a", "k")).unwrap();

@@ -92,6 +92,20 @@ impl Graph {
         Ok(id)
     }
 
+    /// Remove a node and every edge touching it. Returns whether the node
+    /// existed. Needed by a live editor (and by graph re-compilation).
+    pub fn remove_node(&mut self, id: &NodeId) -> bool {
+        let existed = self.nodes.remove(id).is_some();
+        self.edges
+            .retain(|_, conn| &conn.from.0 != id && &conn.to.0 != id);
+        existed
+    }
+
+    /// Remove a single edge by id. Returns whether it existed.
+    pub fn disconnect(&mut self, edge: &EdgeId) -> bool {
+        self.edges.remove(edge).is_some()
+    }
+
     /// Returns a set of node ids referenced by edges but missing from `nodes`.
     pub fn dangling_references(&self) -> HashSet<NodeId> {
         let mut out = HashSet::new();
