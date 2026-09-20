@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: check (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: headless
+            features: "--no-default-features"
+          - name: bevy
+            features: "--features bevy"
+    steps:
+      - uses: actions/checkout@v4
+
+      # Bevy needs these system libraries to build on Linux (windowing, audio,
+      # input). Only the `bevy` feature leg pulls them in.
+      - name: Install Bevy system dependencies
+        if: matrix.name == 'bevy'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev libx11-dev
+
+      # Installs the toolchain pinned in rust-toolchain.toml (incl. rustfmt + clippy).
+      - name: Install Rust
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets ${{ matrix.features }} -- -D warnings
+
+      - name: Test
+        run: cargo test ${{ matrix.features }}
