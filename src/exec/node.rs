@@ -11,6 +11,7 @@
 //! [`ProcessorNode`], so the working processor stack is reused unchanged.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::data::{Frame, Payload, PayloadKind};
 use crate::graph::PortId;
@@ -122,9 +123,15 @@ impl Inputs {
 }
 
 /// The values a node produces on its output ports for one evaluation.
+///
+/// Payloads are held behind `Arc` because that is how the scheduler hands them
+/// to downstream nodes and to taps: one allocation shared across a port's whole
+/// fan-out. Storing them that way here lets a node *reuse* an existing buffer
+/// instead of forcing a fresh allocation every evaluation — see
+/// [`Outputs::set_shared`].
 #[derive(Debug, Default)]
 pub struct Outputs {
-    values: HashMap<PortId, Payload>,
+    values: HashMap<PortId, Arc<Payload>>,
 }
 
 impl Outputs {
@@ -132,16 +139,41 @@ impl Outputs {
         Self::default()
     }
 
+    /// Publish a freshly computed payload on `port`.
+    ///
+    /// This is the common case: the node built a new value this evaluation, so
+    /// it gets a new allocation.
     pub fn set(&mut self, port: &str, payload: Payload) {
+        self.set_shared(port, Arc::new(payload));
+    }
+
+    /// Publish an already-shared payload on `port`, reusing its allocation.
+    ///
+    /// A node that emits the same buffer repeatedly — a still image fed into a
+    /// stream, a cached lookup table, a passthrough that forwards its input
+    /// untouched — should cache the `Arc` and hand the *same* one back each
+    /// evaluation. Consumers can then detect "nothing actually changed" with
+    /// `Arc::ptr_eq`, which is a pointer comparison rather than a scan over
+    /// pixels, and skip expensive work like re-uploading a GPU texture.
+    ///
+    /// Note this is orthogonal to a tap's sequence number: `seq` still advances
+    /// on every publish (the stream is live), while pointer identity stays
+    /// stable (the content did not change). See [`crate::exec::Tap`].
+    pub fn set_shared(&mut self, port: &str, payload: Arc<Payload>) {
         self.values.insert(PortId(port.to_string()), payload);
     }
 
     pub fn get(&self, port: &str) -> Option<&Payload> {
-        self.values.get(port)
+        self.values.get(port).map(Arc::as_ref)
+    }
+
+    /// The shared handle for `port`, if it produced one.
+    pub fn get_shared(&self, port: &str) -> Option<Arc<Payload>> {
+        self.values.get(port).cloned()
     }
 
     /// Consume the outputs as a raw port→payload map (used by the scheduler).
-    pub fn into_map(self) -> HashMap<PortId, Payload> {
+    pub fn into_map(self) -> HashMap<PortId, Arc<Payload>> {
         self.values
     }
 }

@@ -8,6 +8,7 @@ use pipe_graph::exec::{
     Inputs, Node, NodeError, Outputs, PortSet, PortSpec, Registry, Runtime, builtin_registry,
 };
 use pipe_graph::graph::{Graph, NodeId, NodeSpec, Params, PortId};
+use std::sync::Arc;
 
 fn node(id: &str, kind: &str, params: &[(&str, &str)]) -> NodeSpec {
     let mut p = Params::new();
@@ -208,4 +209,115 @@ fn tap_observes_latest_output_without_blocking() {
         rt.output(&id("k"), "out").unwrap().as_scalar(),
         tap.latest().unwrap().as_scalar()
     );
+}
+
+/// A source that broadcasts one still image forever — the "static image into a
+/// stream" case. It caches the payload once and republishes the *same* `Arc`
+/// every evaluation via `set_shared`.
+struct StillSource {
+    frame: Arc<Payload>,
+}
+
+impl Node for StillSource {
+    fn ports(&self) -> PortSet {
+        PortSet::new(vec![], vec![PortSpec::new("out", PayloadKind::Frame)])
+    }
+
+    fn eval(&mut self, _inputs: &Inputs, outputs: &mut Outputs) -> Result<(), NodeError> {
+        outputs.set_shared("out", self.frame.clone());
+        Ok(())
+    }
+}
+
+/// A source that rebuilds an identical frame from scratch each evaluation.
+/// Byte-for-byte the same output as `StillSource`, but a fresh allocation.
+struct RebuildingSource;
+
+impl Node for RebuildingSource {
+    fn ports(&self) -> PortSet {
+        PortSet::new(vec![], vec![PortSpec::new("out", PayloadKind::Frame)])
+    }
+
+    fn eval(&mut self, _inputs: &Inputs, outputs: &mut Outputs) -> Result<(), NodeError> {
+        outputs.set(
+            "out",
+            Payload::Frame(Frame::from_rgb8(1, 1, vec![(7, 7, 7)])),
+        );
+        Ok(())
+    }
+}
+
+#[test]
+fn still_source_keeps_buffer_identity_while_seq_advances() {
+    // A still broadcast into a stream: every tick is a real publish (the stream
+    // is live), but the pixels never change — so a consumer should be able to
+    // skip re-uploading the buffer without comparing any pixels.
+    let still = Arc::new(Payload::Frame(Frame::from_rgb8(1, 1, vec![(7, 7, 7)])));
+
+    let mut g = Graph::new();
+    g.add_node(node("still", "still", &[])).unwrap();
+
+    let mut reg = Registry::new();
+    let shared = still.clone();
+    reg.register("still", move |_| {
+        Ok(Box::new(StillSource {
+            frame: shared.clone(),
+        }) as Box<dyn Node>)
+    });
+
+    let mut rt = Runtime::instantiate(&g, &reg).unwrap();
+    let tap = rt.add_tap(&id("still"), "out");
+    assert_eq!(tap.seq(), 0, "nothing published yet");
+
+    rt.tick(3).unwrap();
+
+    // Liveness: three publishes landed, so a poller sees three changes...
+    let (seq, latest) = tap.latest_with_seq();
+    assert_eq!(seq, 3);
+
+    // ...but the payload is literally the same allocation the node cached, so
+    // an expensive consumer can bail out on a pointer comparison.
+    let latest = latest.expect("the tap holds the still");
+    assert!(
+        Arc::ptr_eq(&latest, &still),
+        "set_shared must preserve buffer identity through the scheduler"
+    );
+
+    // The always-on output capture sees the same allocation too.
+    assert!(Arc::ptr_eq(
+        &rt.output_arc(&id("still"), "out").unwrap(),
+        &still
+    ));
+}
+
+#[test]
+fn rebuilt_frames_are_distinct_allocations_even_when_equal() {
+    // The contrast case: identical pixels, but a fresh buffer each tick, so
+    // pointer identity correctly reports "this is not the buffer you had".
+    let mut g = Graph::new();
+    g.add_node(node("src", "rebuild", &[])).unwrap();
+
+    let mut reg = Registry::new();
+    reg.register("rebuild", |_| {
+        Ok(Box::new(RebuildingSource) as Box<dyn Node>)
+    });
+
+    let mut rt = Runtime::instantiate(&g, &reg).unwrap();
+    let tap = rt.add_tap(&id("src"), "out");
+
+    rt.run_once().unwrap();
+    let first = tap.latest().unwrap();
+    rt.run_once().unwrap();
+    let second = tap.latest().unwrap();
+
+    assert_eq!(
+        first.as_frame().unwrap(),
+        second.as_frame().unwrap(),
+        "the frames are equal by value"
+    );
+    assert!(
+        !Arc::ptr_eq(&first, &second),
+        "but they are distinct allocations, so a consumer must re-read"
+    );
+    assert_eq!(tap.seq(), 2);
 }
