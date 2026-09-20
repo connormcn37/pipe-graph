@@ -51,7 +51,19 @@ Bevy); UI frontends adapt to it. The pieces:
   - `Runtime` / `compile()` — decomposes the graph into strongly-connected
     components (Tarjan), runs acyclic parts in topological order and cyclic
     parts with a bounded tick loop (feedback edges read the previous tick).
-  - `Tap` — non-blocking latest-value previews on any output port.
+    The resulting `Plan` keeps the *condensation* (the DAG between components)
+    rather than only the flattened order, so later passes can see what is
+    independent (`deps`/`successors`) and what is chained one-to-one
+    (`linear_chains`) — the structural precondition for running branches
+    concurrently, or fusing a run of stages without materializing the values
+    in between.
+  - `Tap` — non-blocking latest-value previews on any output port, carrying a
+    monotonic `seq`. `seq` counts *publishes*, so a still image broadcast into
+    a stream still reads as live; `Arc::ptr_eq` on the payload answers the
+    separate question of whether the buffer actually changed. Read both at
+    once with `latest_with_seq()`. A node that re-emits a cached buffer should
+    publish it with `Outputs::set_shared` to keep that pointer identity stable
+    through the scheduler.
 - **`stages`** — `CropStage`, `CastStage`, `SplitStage`, `MergeStage` as `Node`s.
 - **`editor`** — Bevy-free controller logic: `EditorCommand`/`apply_command`
   (route user intents through the core `Graph`) and `view_diff` (which node

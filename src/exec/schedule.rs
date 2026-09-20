@@ -36,15 +36,125 @@ pub enum Component {
     Cyclic { nodes: Vec<NodeId> },
 }
 
-/// A compiled execution order for a graph.
+/// A compiled execution order for a graph, plus the structure it was derived
+/// from.
+///
+/// [`Plan::components`] is the flat order a single-threaded run follows. The
+/// *condensation* — the DAG of dependencies between those components — is kept
+/// alongside it rather than discarded, because the flat order answers only "is
+/// this order legal?" while the DAG answers the questions optimizations need:
+///
+/// - **What can run concurrently?** Components with no path between them are
+///   independent. A diamond (split → two branches → merge) looks like a straight
+///   line once flattened; in the DAG the branches are visibly parallel.
+/// - **What can be fused?** A run of components chained one-to-one
+///   ([`Plan::linear_chains`]) produces intermediates that nothing else reads,
+///   so a future executor could evaluate the run as a unit and skip
+///   materializing the values in between.
+///
+/// Note the graph as a whole may be cyclic; it is the *condensation* that is
+/// always acyclic, since each cycle is collapsed into one [`Component::Cyclic`].
 #[derive(Debug, Clone)]
 pub struct Plan {
     components: Vec<Component>,
+    /// Condensation edges as `(producer, consumer)` indices into `components`.
+    /// Sorted and deduplicated.
+    deps: Vec<(usize, usize)>,
+    /// Which component each node was placed in.
+    node_component: HashMap<NodeId, usize>,
 }
 
 impl Plan {
+    /// The components in the order a serial run executes them (sources first).
     pub fn components(&self) -> &[Component] {
         &self.components
+    }
+
+    /// Dependency edges between components, as indices into [`Plan::components`].
+    pub fn deps(&self) -> &[(usize, usize)] {
+        &self.deps
+    }
+
+    /// Which component a node belongs to.
+    pub fn component_of(&self, node: &NodeId) -> Option<usize> {
+        self.node_component.get(node).copied()
+    }
+
+    /// Components that consume this one's output.
+    pub fn successors(&self, component: usize) -> Vec<usize> {
+        self.deps
+            .iter()
+            .filter(|(from, _)| *from == component)
+            .map(|(_, to)| *to)
+            .collect()
+    }
+
+    /// Components this one consumes from.
+    pub fn predecessors(&self, component: usize) -> Vec<usize> {
+        self.deps
+            .iter()
+            .filter(|(_, to)| *to == component)
+            .map(|(from, _)| *from)
+            .collect()
+    }
+
+    /// Maximal runs of components chained strictly one-to-one: every component
+    /// in a run feeds exactly one successor, which in turn is fed by only that
+    /// component. Returned as indices into [`Plan::components`]; runs shorter
+    /// than two components are omitted, and the runs are disjoint.
+    ///
+    /// These are *structural* fusion candidates. Because the values passed
+    /// along a run have exactly one producer and one consumer, an executor
+    /// could evaluate the whole run as a unit without materializing the
+    /// intermediates — fewer buffers, less latency.
+    ///
+    /// Two caveats before acting on this:
+    ///
+    /// - Only [`Component::Acyclic`] components participate. A cyclic component
+    ///   iterates internally to settle, so it is a barrier at both its edges.
+    /// - **A `Plan` does not know what is observed.** Taps are registered on the
+    ///   [`Runtime`], and [`Runtime::output`] currently captures every node's
+    ///   output unconditionally. Anything observing a value inside a run is a
+    ///   fusion barrier, so a fusing executor must intersect these runs with
+    ///   whatever is actually being watched.
+    pub fn linear_chains(&self) -> Vec<Vec<usize>> {
+        let n = self.components.len();
+        let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut pred: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for &(from, to) in &self.deps {
+            succ[from].push(to);
+            pred[to].push(from);
+        }
+
+        let acyclic = |i: usize| matches!(self.components[i], Component::Acyclic(_));
+
+        // The component `i` feeds, if that link is private to the two of them.
+        let next_in_chain = |i: usize| -> Option<usize> {
+            if !acyclic(i) || succ[i].len() != 1 {
+                return None;
+            }
+            let j = succ[i][0];
+            (pred[j].len() == 1 && acyclic(j)).then_some(j)
+        };
+
+        let mut chains = Vec::new();
+        for (start, feeding) in pred.iter().enumerate() {
+            if !acyclic(start) {
+                continue;
+            }
+            // Skip components that continue a chain begun earlier.
+            if feeding.len() == 1 && next_in_chain(feeding[0]) == Some(start) {
+                continue;
+            }
+            let mut chain = vec![start];
+            while let Some(next) = next_in_chain(*chain.last().expect("non-empty")) {
+                chain.push(next);
+            }
+            if chain.len() > 1 {
+                chains.push(chain);
+            }
+        }
+        chains
     }
 }
 
@@ -112,18 +222,47 @@ pub fn compile(graph: &Graph) -> Plan {
     // Tarjan yields SCCs sinks-first (reverse topological); reverse for sources-first.
     let sccs = tarjan_scc(n, &adj);
 
+    // Component index of every node, in the same sources-first order.
+    let mut comp_of = vec![usize::MAX; n];
+    for (ci, comp) in sccs.iter().rev().enumerate() {
+        for &node in comp {
+            comp_of[node] = ci;
+        }
+    }
+
     let mut components = Vec::with_capacity(sccs.len());
-    for comp in sccs.into_iter().rev() {
+    let mut node_component: HashMap<NodeId, usize> = HashMap::with_capacity(n);
+    for (ci, comp) in sccs.iter().rev().enumerate() {
+        for &node in comp {
+            node_component.insert(ids[node].clone(), ci);
+        }
         if comp.len() == 1 && !has_self_loop[comp[0]] {
             components.push(Component::Acyclic(ids[comp[0]].clone()));
         } else {
-            let mut nodes: Vec<NodeId> = comp.into_iter().map(|i| ids[i].clone()).collect();
+            let mut nodes: Vec<NodeId> = comp.iter().map(|&i| ids[i].clone()).collect();
             nodes.sort_by(|a, b| a.0.cmp(&b.0));
             components.push(Component::Cyclic { nodes });
         }
     }
 
-    Plan { components }
+    // Condensation: keep the node-level edges that cross component boundaries.
+    // Edges inside a component are the cycle itself and carry no ordering.
+    let mut deps: Vec<(usize, usize)> = Vec::new();
+    for (u, targets) in adj.iter().enumerate() {
+        for &v in targets {
+            if comp_of[u] != comp_of[v] {
+                deps.push((comp_of[u], comp_of[v]));
+            }
+        }
+    }
+    deps.sort_unstable();
+    deps.dedup();
+
+    Plan {
+        components,
+        deps,
+        node_component,
+    }
 }
 
 /// Iterative Tarjan's strongly-connected-components. Returns components in the
@@ -389,12 +528,12 @@ impl Runtime {
     }
 
     fn commit(&mut self, id: &NodeId, outputs: Outputs) {
-        // Share each output payload across its fan-out edges via one Arc.
-        let arced: HashMap<PortId, Arc<Payload>> = outputs
-            .into_map()
-            .into_iter()
-            .map(|(port, payload)| (port, Arc::new(payload)))
-            .collect();
+        // Each output payload is already shared: one Arc spans the port's whole
+        // fan-out, its taps, and `node_outputs`. Taking it as-is (rather than
+        // re-wrapping) preserves pointer identity across evaluations, so a node
+        // that republished a cached buffer via `Outputs::set_shared` stays
+        // detectable downstream with `Arc::ptr_eq`.
+        let arced: HashMap<PortId, Arc<Payload>> = outputs.into_map();
 
         let out_edges = self.outgoing.get(id).cloned().unwrap_or_default();
         for i in out_edges {
@@ -486,5 +625,145 @@ mod tests {
                 nodes: vec![NodeId("a".to_string())],
             }]
         );
+    }
+
+    /// A diamond: `s` fans out to `x` and `y`, which both feed `m`.
+    fn diamond() -> Graph {
+        let mut g = Graph::new();
+        for id in ["s", "x", "y", "m"] {
+            g.add_node(spec(id, "k")).unwrap();
+        }
+        g.connect(port("s", "out"), port("x", "in")).unwrap();
+        g.connect(port("s", "out"), port("y", "in")).unwrap();
+        g.connect(port("x", "out"), port("m", "a")).unwrap();
+        g.connect(port("y", "out"), port("m", "b")).unwrap();
+        g
+    }
+
+    #[test]
+    fn condensation_edges_survive_compilation() {
+        let plan = compile(&diamond());
+        let at = |id: &str| plan.component_of(&NodeId(id.to_string())).unwrap();
+
+        // `x` and `y` are independent, so which of them takes the lower index
+        // is arbitrary; compare the edge set, not an incidental numbering.
+        let mut expected = vec![
+            (at("s"), at("x")),
+            (at("s"), at("y")),
+            (at("x"), at("m")),
+            (at("y"), at("m")),
+        ];
+        expected.sort_unstable();
+        assert_eq!(plan.deps(), expected);
+
+        let sorted = |mut v: Vec<usize>| {
+            v.sort_unstable();
+            v
+        };
+        assert_eq!(
+            sorted(plan.successors(at("s"))),
+            sorted(vec![at("x"), at("y")])
+        );
+        assert_eq!(
+            sorted(plan.predecessors(at("m"))),
+            sorted(vec![at("x"), at("y")])
+        );
+        assert!(plan.predecessors(at("s")).is_empty());
+    }
+
+    #[test]
+    fn parallel_branches_are_visible_in_the_dag_but_not_the_flat_order() {
+        let plan = compile(&diamond());
+        let at = |id: &str| plan.component_of(&NodeId(id.to_string())).unwrap();
+
+        // Flattened, x and y are simply adjacent steps — indistinguishable from
+        // a dependency. The DAG shows neither feeds the other.
+        assert!(!plan.successors(at("x")).contains(&at("y")));
+        assert!(!plan.successors(at("y")).contains(&at("x")));
+    }
+
+    #[test]
+    fn duplicate_edges_between_two_nodes_yield_one_dependency() {
+        // Two ports of `b` fed from `a`: still a single component dependency.
+        let mut g = Graph::new();
+        g.add_node(spec("a", "k")).unwrap();
+        g.add_node(spec("b", "k")).unwrap();
+        g.connect(port("a", "out"), port("b", "one")).unwrap();
+        g.connect(port("a", "out"), port("b", "two")).unwrap();
+
+        let plan = compile(&g);
+        assert_eq!(plan.deps().len(), 1);
+    }
+
+    #[test]
+    fn straight_run_is_one_fusable_chain() {
+        let mut g = Graph::new();
+        for id in ["a", "b", "c"] {
+            g.add_node(spec(id, "k")).unwrap();
+        }
+        g.connect(port("a", "out"), port("b", "in")).unwrap();
+        g.connect(port("b", "out"), port("c", "in")).unwrap();
+
+        let plan = compile(&g);
+        assert_eq!(plan.linear_chains(), vec![vec![0, 1, 2]]);
+    }
+
+    #[test]
+    fn fan_out_and_fan_in_break_chains() {
+        // In the diamond nothing is chained one-to-one: `s` has two consumers
+        // and `m` has two producers, so each branch stands alone.
+        let plan = compile(&diamond());
+        assert!(
+            plan.linear_chains().is_empty(),
+            "no component pair is a private producer/consumer link"
+        );
+    }
+
+    #[test]
+    fn a_chain_stops_at_a_cycle() {
+        // a -> b -> c, with b self-looping: b is cyclic, so it is a barrier and
+        // no run of two or more acyclic components remains.
+        let mut g = Graph::new();
+        for id in ["a", "b", "c"] {
+            g.add_node(spec(id, "k")).unwrap();
+        }
+        g.connect(port("a", "out"), port("b", "in")).unwrap();
+        g.connect(port("b", "out"), port("b", "in")).unwrap();
+        g.connect(port("b", "out"), port("c", "in")).unwrap();
+
+        let plan = compile(&g);
+        let at = |id: &str| plan.component_of(&NodeId(id.to_string())).unwrap();
+        assert!(matches!(
+            plan.components()[at("b")],
+            Component::Cyclic { .. }
+        ));
+        assert!(plan.linear_chains().is_empty());
+    }
+
+    #[test]
+    fn chains_are_disjoint_and_maximal() {
+        // Two independent runs: a->b->c and p->q.
+        let mut g = Graph::new();
+        for id in ["a", "b", "c", "p", "q"] {
+            g.add_node(spec(id, "k")).unwrap();
+        }
+        g.connect(port("a", "out"), port("b", "in")).unwrap();
+        g.connect(port("b", "out"), port("c", "in")).unwrap();
+        g.connect(port("p", "out"), port("q", "in")).unwrap();
+
+        let plan = compile(&g);
+        let chains = plan.linear_chains();
+        assert_eq!(chains.len(), 2);
+
+        let mut lens: Vec<usize> = chains.iter().map(Vec::len).collect();
+        lens.sort_unstable();
+        assert_eq!(lens, vec![2, 3]);
+
+        // No component appears in two chains.
+        let mut seen: Vec<usize> = chains.concat();
+        let total = seen.len();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), total);
     }
 }
