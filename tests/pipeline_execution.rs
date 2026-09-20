@@ -321,3 +321,177 @@ fn rebuilt_frames_are_distinct_allocations_even_when_equal() {
     );
     assert_eq!(tap.seq(), 2);
 }
+
+/// `a -> b -> c`, each clearing one channel. Only `c`'s output is terminal.
+fn three_stage_chain() -> (Graph, Registry) {
+    let mut g = Graph::new();
+    g.add_node(node("a", "clear_channel", &[("channel", "red")]))
+        .unwrap();
+    g.add_node(node("b", "clear_channel", &[("channel", "green")]))
+        .unwrap();
+    g.add_node(node("c", "clear_channel", &[("channel", "blue")]))
+        .unwrap();
+    g.connect(port("a", "out"), port("b", "in")).unwrap();
+    g.connect(port("b", "out"), port("c", "in")).unwrap();
+    (g, builtin_registry())
+}
+
+fn white_pixel() -> Payload {
+    Payload::Frame(Frame::from_rgb8(1, 1, vec![(255, 255, 255)]))
+}
+
+#[test]
+fn results_are_captured_but_intermediates_are_opt_in() {
+    let (g, reg) = three_stage_chain();
+    let mut rt = Runtime::instantiate(&g, &reg).unwrap();
+    rt.set_input(&id("a"), "in", white_pixel());
+    rt.run_once().unwrap();
+
+    // The pipeline's result never leaves its component, so it costs nothing to
+    // keep and is captured without asking.
+    assert!(rt.is_observed(&id("c"), "out"));
+    assert!(rt.output(&id("c"), "out").is_some());
+
+    // The intermediates are dropped once the consuming node has read them.
+    assert!(!rt.is_observed(&id("a"), "out"));
+    assert!(rt.output(&id("a"), "out").is_none());
+    assert!(rt.output(&id("b"), "out").is_none());
+}
+
+#[test]
+fn watching_an_intermediate_makes_it_readable_and_unwatching_drops_it() {
+    let (g, reg) = three_stage_chain();
+    let mut rt = Runtime::instantiate(&g, &reg).unwrap();
+    rt.set_input(&id("a"), "in", white_pixel());
+
+    rt.watch(&id("b"), "out");
+    rt.run_once().unwrap();
+
+    // a cleared red, b cleared green.
+    assert_eq!(
+        rt.output(&id("b"), "out")
+            .unwrap()
+            .as_frame()
+            .unwrap()
+            .to_rgb8(),
+        vec![(0, 0, 255)]
+    );
+
+    rt.unwatch(&id("b"), "out");
+    assert!(
+        rt.output(&id("b"), "out").is_none(),
+        "a value that will no longer be refreshed must not linger"
+    );
+    assert!(rt.output(&id("c"), "out").is_some(), "c is unaffected");
+}
+
+#[test]
+fn capture_all_restores_unconditional_capture() {
+    let (g, reg) = three_stage_chain();
+    let mut rt = Runtime::instantiate(&g, &reg).unwrap();
+    rt.set_input(&id("a"), "in", white_pixel());
+
+    rt.set_capture_all(true);
+    rt.run_once().unwrap();
+    assert!(rt.output(&id("a"), "out").is_some());
+    assert!(rt.output(&id("b"), "out").is_some());
+
+    rt.set_capture_all(false);
+    rt.run_once().unwrap();
+    assert!(rt.output(&id("a"), "out").is_none());
+}
+
+#[test]
+fn a_live_tap_keeps_a_port_observed_on_its_own() {
+    let (g, reg) = three_stage_chain();
+    let mut rt = Runtime::instantiate(&g, &reg).unwrap();
+
+    let tap = rt.add_tap(&id("b"), "out");
+    assert!(rt.is_observed(&id("b"), "out"));
+
+    // `unwatch` undoes `watch`, and nothing else: the tap still needs the value.
+    rt.unwatch(&id("b"), "out");
+    assert!(
+        rt.is_observed(&id("b"), "out"),
+        "unwatch must not silently starve a live tap"
+    );
+
+    rt.set_input(&id("a"), "in", white_pixel());
+    rt.run_once().unwrap();
+    assert!(tap.latest().is_some());
+
+    assert_eq!(rt.remove_taps(&id("b"), "out"), 1);
+    assert!(!rt.is_observed(&id("b"), "out"));
+}
+
+#[test]
+fn observation_splits_a_fusable_run_only_where_it_looks() {
+    // a -> b -> c -> d: one structural chain of four.
+    let mut g = Graph::new();
+    for (name, channel) in [("a", "red"), ("b", "green"), ("c", "blue"), ("d", "red")] {
+        g.add_node(node(name, "clear_channel", &[("channel", channel)]))
+            .unwrap();
+    }
+    g.connect(port("a", "out"), port("b", "in")).unwrap();
+    g.connect(port("b", "out"), port("c", "in")).unwrap();
+    g.connect(port("c", "out"), port("d", "in")).unwrap();
+
+    let reg = builtin_registry();
+    let mut rt = Runtime::instantiate(&g, &reg).unwrap();
+
+    // `d`'s output is captured, but a run's own result has to materialize
+    // anyway, so it is not a barrier: the whole chain is one run.
+    assert_eq!(rt.fusable_runs(), &[vec![0, 1, 2, 3]]);
+
+    // Previewing b forces b's value to exist. The run splits there, and there
+    // only -- you pay one materialization for the frame you asked to see.
+    rt.watch(&id("b"), "out");
+    assert_eq!(rt.fusable_runs(), &[vec![0, 1], vec![2, 3]]);
+
+    // Stop looking and the run heals.
+    rt.unwatch(&id("b"), "out");
+    assert_eq!(rt.fusable_runs(), &[vec![0, 1, 2, 3]]);
+
+    // Capturing everything blocks every fusion, as it must.
+    rt.set_capture_all(true);
+    assert!(rt.fusable_runs().is_empty());
+}
+
+#[test]
+fn attaching_a_tap_mid_stream_preserves_pipeline_state() {
+    // The scenario the opt-in capture exists to serve: a pipeline is streaming
+    // and someone clicks "preview" on a node. Re-deriving what to capture must
+    // not rebuild nodes or edge buffers, or a feedback loop would silently
+    // restart mid-convergence.
+    let mut g = Graph::new();
+    g.add_node(node("k", "counter", &[])).unwrap();
+    g.connect(port("k", "out"), port("k", "prev")).unwrap();
+
+    let mut reg = Registry::new();
+    reg.register("counter", |_| Ok(Box::new(Counter) as Box<dyn Node>));
+
+    let mut rt = Runtime::instantiate(&g, &reg).unwrap();
+    rt.set_max_iters(1);
+    rt.reset();
+
+    for _ in 0..3 {
+        rt.run_once().unwrap();
+    }
+    assert_eq!(rt.output(&id("k"), "out").unwrap().as_scalar(), Some(3.0));
+
+    // Preview attached mid-stream.
+    let tap = rt.add_tap(&id("k"), "out");
+
+    rt.run_once().unwrap();
+    assert_eq!(
+        rt.output(&id("k"), "out").unwrap().as_scalar(),
+        Some(4.0),
+        "the accumulator kept counting instead of restarting at 1"
+    );
+    assert_eq!(tap.latest().unwrap().as_scalar(), Some(4.0));
+
+    // Detaching mid-stream is equally non-destructive.
+    rt.remove_taps(&id("k"), "out");
+    rt.run_once().unwrap();
+    assert_eq!(rt.output(&id("k"), "out").unwrap().as_scalar(), Some(5.0));
+}

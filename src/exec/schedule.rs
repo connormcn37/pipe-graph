@@ -15,7 +15,7 @@
 //! previous iteration's buffers, then all results are committed together — so a
 //! feedback edge naturally reads the previous tick's value.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::data::Payload;
@@ -112,11 +112,11 @@ impl Plan {
     ///
     /// - Only [`Component::Acyclic`] components participate. A cyclic component
     ///   iterates internally to settle, so it is a barrier at both its edges.
-    /// - **A `Plan` does not know what is observed.** Taps are registered on the
-    ///   [`Runtime`], and [`Runtime::output`] currently captures every node's
-    ///   output unconditionally. Anything observing a value inside a run is a
-    ///   fusion barrier, so a fusing executor must intersect these runs with
-    ///   whatever is actually being watched.
+    /// - **A `Plan` does not know what is observed.** Anything watching a value
+    ///   inside a run is a fusion barrier, and observation is a property of the
+    ///   [`Runtime`], not the topology. Use [`Runtime::fusable_runs`] for the
+    ///   runs that survive what is actually being watched; this method reports
+    ///   the structure they are cut from.
     pub fn linear_chains(&self) -> Vec<Vec<usize>> {
         let n = self.components.len();
         let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
@@ -346,7 +346,19 @@ pub struct Runtime {
     /// Last outputs produced by each node (an always-on tap; read via `output`).
     node_outputs: HashMap<NodeId, HashMap<PortId, Arc<Payload>>>,
     /// Live-preview taps registered on (node, output-port) pairs.
-    taps: HashMap<(NodeId, PortId), Vec<Tap>>,
+    taps: HashMap<NodeId, HashMap<PortId, Vec<Tap>>>,
+    /// Ports a caller asked to capture, via [`Runtime::watch`] or
+    /// [`Runtime::add_tap`].
+    watched: HashMap<NodeId, HashSet<PortId>>,
+    /// Ports captured for free: their value never leaves its own component, so
+    /// it is materialized either way. Computed once at instantiation.
+    terminal: HashMap<NodeId, HashSet<PortId>>,
+    /// Capture every port regardless of the above (debugging escape hatch).
+    capture_all: bool,
+    /// Runs of components that could be fused given what is currently
+    /// observed. Derived from the plan and the observed set; see
+    /// [`Runtime::fusable_runs`].
+    fusable: Vec<Vec<usize>>,
     max_iters: u32,
 }
 
@@ -384,7 +396,9 @@ impl Runtime {
             incoming.entry(conn.to.0.clone()).or_default().push(i);
         }
 
-        Ok(Self {
+        let terminal = terminal_ports(graph, &plan, &nodes);
+
+        let mut runtime = Self {
             plan,
             nodes,
             edges,
@@ -393,8 +407,14 @@ impl Runtime {
             external: HashMap::new(),
             node_outputs: HashMap::new(),
             taps: HashMap::new(),
+            watched: HashMap::new(),
+            terminal,
+            capture_all: false,
+            fusable: Vec::new(),
             max_iters: DEFAULT_MAX_ITERS,
-        })
+        };
+        runtime.recompute_fusable();
+        Ok(runtime)
     }
 
     pub fn plan(&self) -> &Plan {
@@ -415,12 +435,24 @@ impl Runtime {
             .insert(PortId(port.to_string()), Arc::new(payload));
     }
 
-    /// The last value a node produced on `port`, if any.
+    /// The last value a node produced on `port`, if it is being captured.
+    ///
+    /// Capture is opt-in for intermediates. A port whose value leaves its
+    /// component is dropped once the consuming node has read it, so this
+    /// returns `None` for one unless [`Runtime::watch`] or
+    /// [`Runtime::add_tap`] asked for it — check with
+    /// [`Runtime::is_observed`] if a `None` is surprising, or turn on
+    /// [`Runtime::set_capture_all`] while debugging.
+    ///
+    /// A pipeline's results need no opt-in: a port whose value never leaves
+    /// its component is captured from the start, which covers both a leaf
+    /// node's output and anything circulating inside a feedback loop.
     pub fn output(&self, node: &NodeId, port: &str) -> Option<&Payload> {
         self.node_outputs.get(node)?.get(port).map(Arc::as_ref)
     }
 
-    /// A cheap shared handle to a node's last output on `port`.
+    /// A cheap shared handle to a node's last output on `port`. Subject to the
+    /// same opt-in capture rule as [`Runtime::output`].
     pub fn output_arc(&self, node: &NodeId, port: &str) -> Option<Arc<Payload>> {
         self.node_outputs.get(node)?.get(port).cloned()
     }
@@ -429,13 +461,168 @@ impl Runtime {
     ///
     /// Returns a cloneable [`Tap`] handle that always reflects the latest value
     /// produced on that port. Multiple taps may observe the same port.
+    ///
+    /// A live tap makes the port observed on its own, independently of
+    /// [`Runtime::watch`]: [`Runtime::output`] can read it, and a fusing
+    /// executor knows the value has to exist. Attaching a tap never rebuilds
+    /// nodes or edge buffers, so it is safe mid-stream: see
+    /// [`Runtime::fusable_runs`].
     pub fn add_tap(&mut self, node: &NodeId, port: &str) -> Tap {
         let tap = Tap::new();
         self.taps
-            .entry((node.clone(), PortId(port.to_string())))
+            .entry(node.clone())
+            .or_default()
+            .entry(PortId(port.to_string()))
             .or_default()
             .push(tap.clone());
+        self.recompute_fusable();
         tap
+    }
+
+    /// Detach every tap on `port`, and drop the value captured for it if
+    /// nothing else is observing that port.
+    ///
+    /// Returns how many taps were removed. Their handles keep working as
+    /// values; they simply stop being published to.
+    pub fn remove_taps(&mut self, node: &NodeId, port: &str) -> usize {
+        let removed = self
+            .taps
+            .get_mut(node)
+            .and_then(|ports| ports.remove(port))
+            .map_or(0, |taps| taps.len());
+        if self.taps.get(node).is_some_and(HashMap::is_empty) {
+            self.taps.remove(node);
+        }
+        if removed > 0 {
+            if !self.is_observed(node, port)
+                && let Some(captured) = self.node_outputs.get_mut(node)
+            {
+                captured.remove(port);
+            }
+            self.recompute_fusable();
+        }
+        removed
+    }
+
+    /// Capture the value produced on `port` so [`Runtime::output`] can read it.
+    ///
+    /// Ports whose value never leaves its component are captured already (a
+    /// pipeline's results, and anything inside a feedback loop); this is for
+    /// probing an *intermediate*, which is otherwise dropped as soon as the
+    /// consuming node has read it.
+    pub fn watch(&mut self, node: &NodeId, port: &str) {
+        self.watched
+            .entry(node.clone())
+            .or_default()
+            .insert(PortId(port.to_string()));
+        self.recompute_fusable();
+    }
+
+    /// Undo a [`Runtime::watch`], dropping the value already captured there so
+    /// no stale frame is served from a port that will no longer be refreshed.
+    ///
+    /// Has no effect on a port that is observed for another reason — a live
+    /// tap, or a value that never leaves its component. Use
+    /// [`Runtime::remove_taps`] to detach taps.
+    pub fn unwatch(&mut self, node: &NodeId, port: &str) {
+        if let Some(ports) = self.watched.get_mut(node) {
+            ports.remove(port);
+            if ports.is_empty() {
+                self.watched.remove(node);
+            }
+        }
+        if !self.is_observed(node, port)
+            && let Some(captured) = self.node_outputs.get_mut(node)
+        {
+            captured.remove(port);
+        }
+        self.recompute_fusable();
+    }
+
+    /// Capture every port, restoring the unconditional behaviour this runtime
+    /// had before capture became opt-in. Convenient while debugging a graph;
+    /// it pins one payload per port and blocks every fusion opportunity, so it
+    /// is not the setting to ship.
+    pub fn set_capture_all(&mut self, enabled: bool) {
+        self.capture_all = enabled;
+        self.recompute_fusable();
+    }
+
+    /// Whether `port`'s value is captured for [`Runtime::output`].
+    pub fn is_observed(&self, node: &NodeId, port: &str) -> bool {
+        self.capture_all
+            || self.terminal.get(node).is_some_and(|p| p.contains(port))
+            || self.watched.get(node).is_some_and(|p| p.contains(port))
+            || self.taps.get(node).is_some_and(|p| p.contains_key(port))
+    }
+
+    /// Runs of components that could be evaluated as a unit, given what is
+    /// currently observed. Indices into [`Plan::components`].
+    ///
+    /// This is [`Plan::linear_chains`] cut at every point something is
+    /// watching. A chain `a -> b -> c -> d` with `b`'s output tapped yields
+    /// `[a, b]` and `[c, d]`: tapping forces `b`'s value to exist, so the run
+    /// splits there and nowhere else — you pay one materialization for the
+    /// frame you asked to see.
+    ///
+    /// Recomputed whenever the observed set changes, from the plan and the
+    /// observed set alone. Nodes and edge buffers are never rebuilt, so
+    /// attaching a preview to a running pipeline cannot reset a node's internal
+    /// state or a feedback loop mid-convergence. Changing the graph's
+    /// *topology* is a different matter and still needs a fresh
+    /// [`Runtime::instantiate`].
+    pub fn fusable_runs(&self) -> &[Vec<usize>] {
+        &self.fusable
+    }
+
+    fn observes(&self, node: &NodeId, port: &PortId) -> bool {
+        self.capture_all
+            || self.terminal.get(node).is_some_and(|p| p.contains(port))
+            || self.watched.get(node).is_some_and(|p| p.contains(port))
+            || self.taps.get(node).is_some_and(|p| p.contains_key(port))
+    }
+
+    /// True when nothing observes any value passed from component `from` to
+    /// component `to`, so the two could be evaluated without the intermediate
+    /// ever existing. Checks the specific ports carrying the link, not the
+    /// nodes as a whole — a split whose other outputs are watched can still
+    /// fuse along the branch nobody is looking at.
+    fn link_is_private(&self, from: usize, to: usize) -> bool {
+        !self.edges.iter().any(|edge| {
+            self.plan.component_of(&edge.from.0) == Some(from)
+                && self.plan.component_of(&edge.to.0) == Some(to)
+                && self.observes(&edge.from.0, &edge.from.1)
+        })
+    }
+
+    /// Cut one structural chain into the runs that survive observation.
+    fn split_chain(&self, chain: &[usize]) -> Vec<Vec<usize>> {
+        let mut runs: Vec<Vec<usize>> = Vec::new();
+        let mut current: Vec<usize> = vec![chain[0]];
+        for link in chain.windows(2) {
+            if !self.link_is_private(link[0], link[1]) {
+                // A run of one component is not a fusion; drop it.
+                if current.len() > 1 {
+                    runs.push(std::mem::take(&mut current));
+                } else {
+                    current.clear();
+                }
+            }
+            current.push(link[1]);
+        }
+        if current.len() > 1 {
+            runs.push(current);
+        }
+        runs
+    }
+
+    fn recompute_fusable(&mut self) {
+        self.fusable = self
+            .plan
+            .linear_chains()
+            .iter()
+            .flat_map(|chain| self.split_chain(chain))
+            .collect();
     }
 
     /// Clear all edge buffers and captured outputs, and reset node state.
@@ -444,9 +631,11 @@ impl Runtime {
             e.buffer.clear();
         }
         self.node_outputs.clear();
-        for taps in self.taps.values() {
-            for tap in taps {
-                tap.clear();
+        for ports in self.taps.values() {
+            for taps in ports.values() {
+                for tap in taps {
+                    tap.clear();
+                }
             }
         }
         for node in self.nodes.values_mut() {
@@ -544,9 +733,9 @@ impl Runtime {
         }
 
         // Publish to any live-preview taps (non-blocking: a quick lock+store).
-        if !self.taps.is_empty() {
+        if let Some(node_taps) = self.taps.get(id) {
             for (port, shared) in &arced {
-                if let Some(taps) = self.taps.get(&(id.clone(), port.clone())) {
+                if let Some(taps) = node_taps.get(port) {
                     for tap in taps {
                         tap.publish(shared.clone());
                     }
@@ -554,8 +743,48 @@ impl Runtime {
             }
         }
 
-        self.node_outputs.insert(id.clone(), arced);
+        // Capture only what something is actually observing. An unobserved
+        // intermediate is exactly what a fusing executor is free to never
+        // materialize, so keeping it here would defeat the optimization (and
+        // pins a frame in memory for a reader that never comes).
+        let captured: HashMap<PortId, Arc<Payload>> = arced
+            .into_iter()
+            .filter(|(port, _)| self.observes(id, port))
+            .collect();
+        if captured.is_empty() {
+            self.node_outputs.remove(id);
+        } else {
+            self.node_outputs.insert(id.clone(), captured);
+        }
     }
+}
+
+/// Output ports whose value never leaves its own component.
+///
+/// Either nothing consumes the value, or only nodes inside the same component
+/// do — and a cyclic component materializes its members' outputs each
+/// iteration regardless. Capturing these is therefore free: no fusion
+/// opportunity is lost, because there was none to lose.
+fn terminal_ports(
+    graph: &Graph,
+    plan: &Plan,
+    nodes: &HashMap<NodeId, Box<dyn Node>>,
+) -> HashMap<NodeId, HashSet<PortId>> {
+    let mut terminal: HashMap<NodeId, HashSet<PortId>> = HashMap::new();
+    for (id, node) in nodes {
+        let component = plan.component_of(id);
+        for spec in node.ports().outputs {
+            let escapes = graph.edges.values().any(|conn| {
+                conn.from.0 == *id
+                    && conn.from.1 == spec.id
+                    && plan.component_of(&conn.to.0) != component
+            });
+            if !escapes {
+                terminal.entry(id.clone()).or_default().insert(spec.id);
+            }
+        }
+    }
+    terminal
 }
 
 #[cfg(test)]

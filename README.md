@@ -56,7 +56,18 @@ Bevy); UI frontends adapt to it. The pieces:
     independent (`deps`/`successors`) and what is chained one-to-one
     (`linear_chains`) — the structural precondition for running branches
     concurrently, or fusing a run of stages without materializing the values
-    in between.
+    in between. `Runtime::fusable_runs` cuts those chains at whatever is
+    actually being watched, and is re-derived from the plan alone, so
+    attaching a preview to a running pipeline never rebuilds nodes or edge
+    buffers (a feedback loop keeps converging).
+  - **Capture is opt-in.** A port whose value never leaves its component is
+    captured from the start — a pipeline's results, and anything circulating
+    inside a feedback loop. An *intermediate* is dropped once the consuming
+    node has read it, so `Runtime::output` returns `None` for one until
+    `watch`/`add_tap` asks for it (`set_capture_all` restores the
+    unconditional behaviour while debugging). What is observed is exactly what
+    a fusing executor may not eliminate, so the two are one set rather than
+    two.
   - `Tap` — non-blocking latest-value previews on any output port, carrying a
     monotonic `seq`. `seq` counts *publishes*, so a still image broadcast into
     a stream still reads as live; `Arc::ptr_eq` on the payload answers the
