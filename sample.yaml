@@ -1,0 +1,17 @@
+nodes:
+  - id: split
+    kind: split
+    params:
+      channels: "3"
+  - id: merge
+    kind: merge
+    params:
+      channels: "3"
+
+edges:
+  - from: split.out0
+    to: merge.in0
+  - from: split.out1
+    to: merge.in1
+  - from: split.out2
+    to: merge.in2

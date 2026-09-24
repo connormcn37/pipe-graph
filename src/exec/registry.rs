@@ -112,6 +112,11 @@ impl Registry {
         self.ctors.contains_key(kind)
     }
 
+    /// Returns an iterator over all registered node kinds.
+    pub fn registered_kinds(&self) -> impl Iterator<Item = &str> {
+        self.ctors.keys().map(|k| k.as_str())
+    }
+
     /// Instantiate the node described by `spec`.
     pub fn build(&self, spec: &NodeSpec) -> Result<Box<dyn Node>, BuildError> {
         let ctor = self

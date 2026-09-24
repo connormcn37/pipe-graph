@@ -121,3 +121,49 @@ fn edges_get_distinct_ids() {
 
     assert_ne!(e1, e2);
 }
+
+#[test]
+fn toml_parsing() {
+    let toml_str = r#"
+[[nodes]]
+id = "a"
+kind = "source"
+
+[[nodes]]
+id = "b"
+kind = "clear_channel"
+[nodes.params]
+channel = "red"
+
+[[edges]]
+from = "a.out"
+to = "b.in"
+"#;
+
+    let g = Graph::from_toml(toml_str).unwrap();
+    assert_eq!(g.nodes.len(), 2);
+    assert_eq!(g.edges.len(), 1);
+    
+    let node_b = g.nodes.get(&NodeId("b".into())).unwrap();
+    assert_eq!(node_b.params.get("channel").map(|s| s.as_str()), Some("red"));
+}
+
+#[test]
+fn yaml_parsing() {
+    let yaml_str = r#"
+nodes:
+  - id: a
+    kind: source
+  - id: b
+    kind: clear_channel
+    params:
+      channel: red
+edges:
+  - from: a.out
+    to: b.in
+"#;
+
+    let g = Graph::from_yaml(yaml_str).unwrap();
+    assert_eq!(g.nodes.len(), 2);
+    assert_eq!(g.edges.len(), 1);
+}
