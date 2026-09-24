@@ -1,4 +1,5 @@
 use crate::data::{Frame, FrameData};
+use crate::exec::Registry;
 use crate::traits::Processor;
 
 pub struct Invert;
@@ -18,6 +19,10 @@ impl Processor for Invert {
             }
         }
     }
+}
+
+pub fn register(reg: &mut Registry) {
+    reg.register_processor("invert", |_| Ok(Invert));
 }
 
 #[cfg(test)]

@@ -1,4 +1,5 @@
 use crate::data::{Frame, FrameData};
+use crate::exec::Registry;
 use crate::traits::Processor;
 
 pub struct Grayscale;
@@ -30,6 +31,10 @@ impl Processor for Grayscale {
             }
         }
     }
+}
+
+pub fn register(reg: &mut Registry) {
+    reg.register_processor("grayscale", |_| Ok(Grayscale));
 }
 
 #[cfg(test)]

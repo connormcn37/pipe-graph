@@ -227,7 +227,7 @@ impl<P: Processor> Node for ProcessorNode<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::processors::{Channel, ClearChannel};
+    use crate::stages::clear_channel::{Channel, ClearChannel};
 
     fn inputs_with(port: &str, payload: Payload) -> Inputs {
         let mut m = HashMap::new();

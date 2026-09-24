@@ -1,10 +1,5 @@
-mod clear_channel;
-pub use self::clear_channel::*;
+//! Processor combinators. Individual processors that are node kinds live in
+//! [`crate::stages`].
 
 mod process_list;
 pub use self::process_list::*;
-mod grayscale;
-pub use self::grayscale::*;
-
-mod invert;
-pub use self::invert::*;

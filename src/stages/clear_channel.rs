@@ -1,4 +1,5 @@
 use crate::data::{Frame, FrameData};
+use crate::exec::{BuildError, ParamsExt, Registry};
 use crate::traits::Processor;
 
 /// Named RGB channels, kept for demo ergonomics. Each maps to an interleaved
@@ -49,6 +50,23 @@ impl Processor for ClearChannel {
             }
         }
     }
+}
+
+pub fn register(reg: &mut Registry) {
+    reg.register_processor("clear_channel", |p| {
+        Ok(ClearChannel(match p.get_str("channel")? {
+            "red" => Channel::Red,
+            "green" => Channel::Green,
+            "blue" => Channel::Blue,
+            other => {
+                return Err(BuildError::BadParam {
+                    key: "channel".to_string(),
+                    value: other.to_string(),
+                    expected: "red|green|blue",
+                });
+            }
+        }))
+    });
 }
 
 #[cfg(test)]

@@ -26,7 +26,7 @@ impl Processor for ProcessList {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::processors::{Channel, ClearChannel};
+    use crate::stages::clear_channel::{Channel, ClearChannel};
 
     /// Golden test mirroring the `main.rs` demo: a nested `ProcessList` that
     /// clears red + green (inner) then blue (outer) must zero every channel.

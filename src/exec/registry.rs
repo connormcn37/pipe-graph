@@ -9,7 +9,6 @@ use std::collections::HashMap;
 
 use crate::exec::{Node, PortSet, ProcessorNode};
 use crate::graph::{NodeSpec, Params};
-use crate::processors::{Channel, ClearChannel, Grayscale, Invert};
 use crate::traits::Processor;
 
 /// Errors raised while constructing a node from its spec.
@@ -167,29 +166,11 @@ impl Registry {
     }
 }
 
-/// A registry preloaded with the built-in stage kinds: everything in
-/// `src/stages/` (discovered by `build.rs`) plus the processor kinds.
+/// A registry preloaded with every stage in `src/stages/` (discovered by
+/// `build.rs`; see [`crate::stages`]).
 pub fn builtin_registry() -> Registry {
     let mut reg = Registry::new();
     crate::stages::register_all(&mut reg);
-
-    reg.register_processor("clear_channel", |p| {
-        Ok(ClearChannel(match p.get_str("channel")? {
-            "red" => Channel::Red,
-            "green" => Channel::Green,
-            "blue" => Channel::Blue,
-            other => {
-                return Err(BuildError::BadParam {
-                    key: "channel".to_string(),
-                    value: other.to_string(),
-                    expected: "red|green|blue",
-                });
-            }
-        }))
-    });
-    reg.register_processor("grayscale", |_| Ok(Grayscale));
-    reg.register_processor("invert", |_| Ok(Invert));
-
     reg
 }
 
@@ -403,11 +384,14 @@ mod tests {
             [
                 "blend",
                 "cast",
+                "clear_channel",
                 "crop",
+                "grayscale",
                 "image_read",
                 "image_write",
+                "invert",
                 "merge",
-                "split"
+                "split",
             ]
         );
     }
