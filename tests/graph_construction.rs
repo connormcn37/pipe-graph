@@ -143,9 +143,12 @@ to = "b.in"
     let g = Graph::from_toml(toml_str).unwrap();
     assert_eq!(g.nodes.len(), 2);
     assert_eq!(g.edges.len(), 1);
-    
+
     let node_b = g.nodes.get(&NodeId("b".into())).unwrap();
-    assert_eq!(node_b.params.get("channel").map(|s| s.as_str()), Some("red"));
+    assert_eq!(
+        node_b.params.get("channel").map(|s| s.as_str()),
+        Some("red")
+    );
 }
 
 #[test]

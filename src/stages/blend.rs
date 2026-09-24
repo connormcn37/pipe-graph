@@ -2,6 +2,8 @@ use crate::data::{DType, Frame, FrameData, Payload, PayloadKind};
 use crate::exec::{BuildError, Inputs, Node, NodeError, Outputs, PortSet, PortSpec};
 use crate::graph::Params;
 
+/// Averages two same-shaped frames (`in0`, `in1`) into `out`.
+#[derive(Default)]
 pub struct BlendStage;
 
 impl BlendStage {
@@ -34,30 +36,31 @@ impl Node for BlendStage {
         let f1 = inputs.frame("in1")?;
 
         if f0.width != f1.width || f0.height != f1.height || f0.channels != f1.channels {
-            return Err(NodeError::Message("blend inputs must have same dimensions and channels".to_string()));
+            return Err(NodeError::Message(
+                "blend inputs must have same dimensions and channels".to_string(),
+            ));
         }
         if f0.dtype() != f1.dtype() {
-            return Err(NodeError::Message("blend inputs must have same dtype".to_string()));
+            return Err(NodeError::Message(
+                "blend inputs must have same dtype".to_string(),
+            ));
         }
 
         let data = match f0.dtype() {
             DType::U8 => {
                 let buf0 = f0.as_u8().unwrap();
                 let buf1 = f1.as_u8().unwrap();
-                let mut out = vec![0u8; buf0.len()];
-                for i in 0..buf0.len() {
-                    out[i] = ((buf0[i] as u32 + buf1[i] as u32) / 2) as u8;
-                }
-                FrameData::U8(out)
+                FrameData::U8(
+                    buf0.iter()
+                        .zip(buf1)
+                        .map(|(&a, &b)| ((a as u16 + b as u16) / 2) as u8)
+                        .collect(),
+                )
             }
             DType::F32 => {
                 let buf0 = f0.as_f32().unwrap();
                 let buf1 = f1.as_f32().unwrap();
-                let mut out = vec![0.0f32; buf0.len()];
-                for i in 0..buf0.len() {
-                    out[i] = (buf0[i] + buf1[i]) * 0.5;
-                }
-                FrameData::F32(out)
+                FrameData::F32(buf0.iter().zip(buf1).map(|(a, b)| (a + b) * 0.5).collect())
             }
         };
 

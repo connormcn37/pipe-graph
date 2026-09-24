@@ -75,7 +75,9 @@ Bevy); UI frontends adapt to it. The pieces:
     once with `latest_with_seq()`. A node that re-emits a cached buffer should
     publish it with `Outputs::set_shared` to keep that pointer identity stable
     through the scheduler.
-- **`stages`** — `CropStage`, `CastStage`, `SplitStage`, `MergeStage` as `Node`s.
+- **`stages`** — the registered node kinds: `crop`, `cast`, `split`, `merge`,
+  `blend`, `image_read`, `image_write`, plus the `Processor`-backed
+  `clear_channel`, `grayscale` and `invert`.
 - **`editor`** — Bevy-free controller logic: `EditorCommand`/`apply_command`
   (route user intents through the core `Graph`) and `view_diff` (which node
   views a frontend should spawn/despawn to mirror the graph).
@@ -90,11 +92,35 @@ are `NodeSpec.params`; `get_last_frame` / `push_frame` are now
 `EdgeBuffer::get_last` / `push`; and a `Pipeline` is a `Graph` executed by a
 `Runtime`.
 
+### Pipeline files
+
+A pipeline is a YAML (or TOML) file of nodes and `node.port` edges; see
+[`sample.yaml`](sample.yaml):
+
+```yaml
+nodes:
+  - id: split
+    kind: split
+    params:
+      channels: "3"
+  - id: merge
+    kind: merge
+    params:
+      channels: "3"
+edges:
+  - from: split.out0
+    to: merge.in0
+  # ...
+```
+
 ### Try it
 
 ```sh
-cargo run                       # runs the processor demo + a split->merge graph
-cargo test                      # headless test suite
-cargo test --features bevy      # also compile/run the Bevy-gated code
+cargo run -- check sample.yaml   # parse, build every node, validate ports
+cargo run -- run sample.yaml     # push a 2x2 test frame into split.in, print merge.out
+cargo run -- run sample.yaml --watch   # re-run whenever the file changes
+cargo run -- run pipe.yaml --input-node a --input-port in --output-node b --output-port out
+cargo run --features bevy -- edit sample.yaml   # Bevy editor (view scaffold only; draws nothing yet)
+cargo test                       # headless test suite
+cargo test --features bevy       # also compile/run the Bevy-gated code
 ```
-

@@ -3,8 +3,8 @@
 //! This module is intentionally small and dependency-light.
 //! The idea is that UI layers (Bevy/egui/etc.) can mirror these types.
 
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use serde::{Serialize, Deserialize};
 
 /// Stable identifier for a node/stage in the graph.
 ///
@@ -95,15 +95,15 @@ impl Graph {
 
     /// Loads a Graph from a YAML string.
     pub fn from_yaml(s: &str) -> Result<Self, GraphError> {
-        let def: PipelineDef = serde_yaml::from_str(s)
-            .map_err(|e| GraphError::ParseError(e.to_string()))?;
+        let def: PipelineDef =
+            serde_yaml::from_str(s).map_err(|e| GraphError::ParseError(e.to_string()))?;
         Self::from_def(&def)
     }
 
     /// Loads a Graph from a TOML string.
     pub fn from_toml(s: &str) -> Result<Self, GraphError> {
-        let def: PipelineDef = toml::from_str(s)
-            .map_err(|e| GraphError::ParseError(e.to_string()))?;
+        let def: PipelineDef =
+            toml::from_str(s).map_err(|e| GraphError::ParseError(e.to_string()))?;
         Self::from_def(&def)
     }
 
@@ -123,8 +123,14 @@ impl Graph {
                 )));
             }
             g.connect(
-                (NodeId(from_parts[0].to_string()), PortId(from_parts[1].to_string())),
-                (NodeId(to_parts[0].to_string()), PortId(to_parts[1].to_string())),
+                (
+                    NodeId(from_parts[0].to_string()),
+                    PortId(from_parts[1].to_string()),
+                ),
+                (
+                    NodeId(to_parts[0].to_string()),
+                    PortId(to_parts[1].to_string()),
+                ),
             )?;
         }
         Ok(g)

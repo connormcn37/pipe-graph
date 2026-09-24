@@ -5,6 +5,8 @@
 //! - [`CastStage`] — 1→1, convert between `u8` and `f32`.
 //! - [`SplitStage`] — 1→k, split a k-channel frame into k single-channel frames.
 //! - [`MergeStage`] — k→1, interleave k single-channel frames into one.
+//! - [`BlendStage`] — 2→1, average two same-shaped frames.
+//! - [`ImageReadStage`] / [`ImageWriteStage`] — 0→1 / 1→0, image file I/O.
 //!
 //! Split/Merge declare a param-dependent number of ports (`out0..`, `in0..`),
 //! which is exactly why [`crate::exec::Node::ports`] takes `&self`.
@@ -13,15 +15,15 @@
 
 mod cast;
 mod crop;
+mod image_io;
 mod merge;
 mod split;
-mod image_io;
 
 pub use self::cast::CastStage;
 pub use self::crop::CropStage;
+pub use self::image_io::{ImageReadStage, ImageWriteStage};
 pub use self::merge::MergeStage;
 pub use self::split::SplitStage;
-pub use self::image_io::{ImageReadStage, ImageWriteStage};
 
 #[cfg(test)]
 mod tests {
@@ -80,4 +82,3 @@ mod tests {
 }
 mod blend;
 pub use self::blend::*;
-

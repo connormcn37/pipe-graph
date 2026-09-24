@@ -8,4 +8,3 @@ pub use self::grayscale::*;
 
 mod invert;
 pub use self::invert::*;
-

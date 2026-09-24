@@ -10,7 +10,9 @@ use std::collections::HashMap;
 use crate::exec::{Node, PortSet, ProcessorNode};
 use crate::graph::{NodeSpec, Params};
 use crate::processors::{Channel, ClearChannel, Grayscale, Invert};
-use crate::stages::{BlendStage, CastStage, CropStage, MergeStage, SplitStage, ImageReadStage, ImageWriteStage};
+use crate::stages::{
+    BlendStage, CastStage, CropStage, ImageReadStage, ImageWriteStage, MergeStage, SplitStage,
+};
 
 /// Errors raised while constructing a node from its spec.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -274,4 +276,3 @@ mod tests {
         ));
     }
 }
-
