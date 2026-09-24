@@ -13,6 +13,7 @@ use crate::processors::{Channel, ClearChannel, Grayscale, Invert};
 use crate::stages::{
     BlendStage, CastStage, CropStage, ImageReadStage, ImageWriteStage, MergeStage, SplitStage,
 };
+use crate::traits::Processor;
 
 /// Errors raised while constructing a node from its spec.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +111,40 @@ impl Registry {
         self.ctors.insert(kind.to_string(), Box::new(ctor));
     }
 
+    /// Register a stage built from its params via `TryFrom<&Params>`.
+    ///
+    /// This is what a stage file's `register` fn normally calls. Unlike
+    /// [`Registry::register`], registering an existing kind panics: two stage
+    /// files claiming one kind is a bug, not an override.
+    pub fn register_stage<T>(&mut self, kind: &str)
+    where
+        T: Node + for<'a> TryFrom<&'a Params, Error = BuildError> + 'static,
+    {
+        self.register_new(kind, |p| Ok(Box::new(T::try_from(p)?) as Box<dyn Node>));
+    }
+
+    /// Register a [`Processor`] as a 1-in/1-out node (ports `in` → `out`).
+    ///
+    /// `ctor` parses params into the processor. Panics on a duplicate kind,
+    /// like [`Registry::register_stage`].
+    pub fn register_processor<P, F>(&mut self, kind: &str, ctor: F)
+    where
+        P: Processor + 'static,
+        F: Fn(&Params) -> Result<P, BuildError> + 'static,
+    {
+        self.register_new(kind, move |p| {
+            Ok(Box::new(ProcessorNode::new(ctor(p)?)) as Box<dyn Node>)
+        });
+    }
+
+    fn register_new<F>(&mut self, kind: &str, ctor: F)
+    where
+        F: Fn(&Params) -> Result<Box<dyn Node>, BuildError> + 'static,
+    {
+        assert!(!self.contains(kind), "node kind '{kind}' registered twice");
+        self.register(kind, ctor);
+    }
+
     pub fn contains(&self, kind: &str) -> bool {
         self.ctors.contains_key(kind)
     }
@@ -192,9 +227,45 @@ pub fn builtin_registry() -> Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::{Frame, Payload};
-    use crate::exec::{Inputs, Outputs};
+    use crate::data::{Frame, FrameData, Payload, PayloadKind};
+    use crate::exec::{Inputs, NodeError, Outputs, PortSpec};
     use crate::graph::{NodeId, PortId};
+    use crate::traits::Processor;
+
+    /// Minimal param-driven stage: `n` output ports, no behaviour.
+    struct Probe(u32);
+
+    impl TryFrom<&Params> for Probe {
+        type Error = BuildError;
+        fn try_from(p: &Params) -> Result<Self, BuildError> {
+            Ok(Probe(p.get_u32_or("n", 0)?))
+        }
+    }
+
+    impl Node for Probe {
+        fn ports(&self) -> PortSet {
+            let outs = (0..self.0)
+                .map(|i| PortSpec::new(format!("out{i}"), PayloadKind::Frame))
+                .collect();
+            PortSet::new(vec![], outs)
+        }
+        fn eval(&mut self, _: &Inputs, _: &mut Outputs) -> Result<(), NodeError> {
+            Ok(())
+        }
+    }
+
+    /// Minimal processor: adds 1 to every u8 sample.
+    struct AddOne;
+
+    impl Processor for AddOne {
+        fn process(&self, f: &mut Frame) {
+            if let FrameData::U8(buf) = f.data_mut() {
+                for v in buf {
+                    *v += 1;
+                }
+            }
+        }
+    }
 
     fn spec(kind: &str, params: &[(&str, &str)]) -> NodeSpec {
         let mut p = Params::new();
@@ -274,5 +345,59 @@ mod tests {
             p.get_u32("scale"),
             Err(BuildError::BadParam { .. })
         ));
+    }
+
+    #[test]
+    fn register_stage_builds_via_try_from() {
+        let mut reg = Registry::new();
+        reg.register_stage::<Probe>("probe");
+        let ports = reg.ports_of(&spec("probe", &[("n", "2")])).unwrap();
+        assert_eq!(ports.outputs.len(), 2);
+        let err = reg.build(&spec("probe", &[("n", "x")])).err().unwrap();
+        assert!(matches!(err, BuildError::BadParam { .. }));
+    }
+
+    #[test]
+    fn register_processor_wraps_in_processor_node() {
+        let mut reg = Registry::new();
+        reg.register_processor("add_one", |_| Ok(AddOne));
+        let mut node = reg.build(&spec("add_one", &[])).unwrap();
+
+        let mut m = HashMap::new();
+        m.insert(
+            PortId("in".to_string()),
+            Payload::Frame(Frame::from_rgb8(1, 1, vec![(1, 2, 3)])),
+        );
+        let mut out = Outputs::new();
+        node.eval(&Inputs::new(m), &mut out).unwrap();
+        assert_eq!(
+            out.get("out").unwrap().as_frame().unwrap().to_rgb8(),
+            vec![(2, 3, 4)]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "node kind 'probe' registered twice")]
+    fn register_stage_rejects_duplicate_kind() {
+        let mut reg = Registry::new();
+        reg.register_stage::<Probe>("probe");
+        reg.register_stage::<Probe>("probe");
+    }
+
+    #[test]
+    #[should_panic(expected = "node kind 'probe' registered twice")]
+    fn register_processor_rejects_kind_taken_by_a_stage() {
+        let mut reg = Registry::new();
+        reg.register_stage::<Probe>("probe");
+        reg.register_processor("probe", |_| Ok(AddOne));
+    }
+
+    #[test]
+    fn plain_register_still_replaces() {
+        let mut reg = Registry::new();
+        reg.register_stage::<Probe>("probe");
+        reg.register("probe", |_| Ok(Box::new(Probe(5)) as Box<dyn Node>));
+        let ports = reg.ports_of(&spec("probe", &[])).unwrap();
+        assert_eq!(ports.outputs.len(), 5);
     }
 }
