@@ -1,7 +1,9 @@
 //! Crop: extract an axis-aligned sub-rectangle, preserving channels and dtype.
 
 use crate::data::{Frame, FrameData, Payload, PayloadKind};
-use crate::exec::{BuildError, Inputs, Node, NodeError, Outputs, ParamsExt, PortSet, PortSpec};
+use crate::exec::{
+    BuildError, Inputs, Node, NodeError, Outputs, ParamsExt, PortSet, PortSpec, Registry,
+};
 use crate::graph::Params;
 
 /// 1→1 stage that crops the input frame to `[x, x+w) x [y, y+h)`.
@@ -95,6 +97,10 @@ impl Node for CropStage {
         outputs.set("out", Payload::Frame(cropped));
         Ok(())
     }
+}
+
+pub fn register(reg: &mut Registry) {
+    reg.register_stage::<CropStage>("crop");
 }
 
 #[cfg(test)]

@@ -1,7 +1,9 @@
 //! Merge: k single-channel frames `(w, h, 1)` into one k-channel frame `(w, h, k)`.
 
 use crate::data::{DType, Frame, FrameData, Payload, PayloadKind};
-use crate::exec::{BuildError, Inputs, Node, NodeError, Outputs, ParamsExt, PortSet, PortSpec};
+use crate::exec::{
+    BuildError, Inputs, Node, NodeError, Outputs, ParamsExt, PortSet, PortSpec, Registry,
+};
 use crate::graph::Params;
 
 /// k→1 stage. Declares input ports `in0 .. in{k-1}`.
@@ -91,6 +93,10 @@ impl Node for MergeStage {
         );
         Ok(())
     }
+}
+
+pub fn register(reg: &mut Registry) {
+    reg.register_stage::<MergeStage>("merge");
 }
 
 #[cfg(test)]

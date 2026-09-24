@@ -42,6 +42,11 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
+      # Stage modules are declared inside a build.rs-generated file, which
+      # `cargo fmt` does not follow; check them directly.
+      - name: Format (stages)
+        run: find src/stages -name '*.rs' -print0 | xargs -0 rustfmt --edition 2024 --check
+
       - name: Clippy
         run: cargo clippy --all-targets ${{ matrix.features }} -- -D warnings
 

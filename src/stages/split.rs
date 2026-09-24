@@ -1,7 +1,9 @@
 //! Split: a k-channel frame `(w, h, k)` into k single-channel frames `(w, h, 1)`.
 
 use crate::data::{Frame, FrameData, Payload, PayloadKind};
-use crate::exec::{BuildError, Inputs, Node, NodeError, Outputs, ParamsExt, PortSet, PortSpec};
+use crate::exec::{
+    BuildError, Inputs, Node, NodeError, Outputs, ParamsExt, PortSet, PortSpec, Registry,
+};
 use crate::graph::Params;
 
 /// 1→k stage. Declares output ports `out0 .. out{k-1}`.
@@ -62,6 +64,10 @@ impl Node for SplitStage {
 
         Ok(())
     }
+}
+
+pub fn register(reg: &mut Registry) {
+    reg.register_stage::<SplitStage>("split");
 }
 
 #[cfg(test)]

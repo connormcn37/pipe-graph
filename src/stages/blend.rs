@@ -1,5 +1,5 @@
 use crate::data::{DType, Frame, FrameData, Payload, PayloadKind};
-use crate::exec::{BuildError, Inputs, Node, NodeError, Outputs, PortSet, PortSpec};
+use crate::exec::{BuildError, Inputs, Node, NodeError, Outputs, PortSet, PortSpec, Registry};
 use crate::graph::Params;
 
 /// Averages two same-shaped frames (`in0`, `in1`) into `out`.
@@ -70,6 +70,10 @@ impl Node for BlendStage {
         );
         Ok(())
     }
+}
+
+pub fn register(reg: &mut Registry) {
+    reg.register_stage::<BlendStage>("blend");
 }
 
 #[cfg(test)]

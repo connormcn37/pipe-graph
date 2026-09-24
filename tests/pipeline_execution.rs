@@ -495,3 +495,36 @@ fn attaching_a_tap_mid_stream_preserves_pipeline_state() {
     rt.run_once().unwrap();
     assert_eq!(rt.output(&id("k"), "out").unwrap().as_scalar(), Some(5.0));
 }
+
+/// Stage-level (no runtime) check that split and merge are inverses.
+#[test]
+fn split_and_merge_stages_invert_each_other() {
+    use pipe_graph::stages::{merge::MergeStage, split::SplitStage};
+    use std::collections::HashMap;
+
+    let src = Frame::from_data(
+        2,
+        2,
+        3,
+        FrameData::U8(vec![1, 10, 100, 2, 20, 101, 3, 30, 102, 4, 40, 103]),
+    );
+
+    let mut split = SplitStage::new(3);
+    let mut m = HashMap::new();
+    m.insert(PortId("in".to_string()), Payload::Frame(src.clone()));
+    let mut split_out = Outputs::new();
+    split.eval(&Inputs::new(m), &mut split_out).unwrap();
+    let ch0 = split_out.get("out0").unwrap().as_frame().unwrap().clone();
+    assert_eq!(ch0.channels, 1);
+    assert_eq!(ch0.as_u8().unwrap(), &[1, 2, 3, 4]);
+
+    let mut merge = MergeStage::new(3);
+    let mut m = HashMap::new();
+    for i in 0..3 {
+        let ch = split_out.get(&format!("out{i}")).unwrap().clone();
+        m.insert(PortId(format!("in{i}")), ch);
+    }
+    let mut merged = Outputs::new();
+    merge.eval(&Inputs::new(m), &mut merged).unwrap();
+    assert_eq!(merged.get("out").unwrap().as_frame().unwrap(), &src);
+}

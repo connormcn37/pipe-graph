@@ -172,3 +172,7 @@ template above; `stages/mod.rs` docs carry the same template.
   it is disabled, stage files still compile; only the IDE view degrades.
 - **Silent non-registration:** impossible by construction; every discovered
   module's `register` is called, and a module without one fails to compile.
+- **rustfmt coverage:** `cargo fmt` only follows out-of-line `mod`
+  declarations, so it skips stage files declared in the generated file. CI
+  runs `rustfmt --check` over `src/stages/` directly; locally run
+  `rustfmt --edition 2024 src/stages/*.rs` after `cargo fmt`.

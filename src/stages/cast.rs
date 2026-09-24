@@ -6,7 +6,9 @@
 //! overrides the default. Casting to the same dtype is an identity copy.
 
 use crate::data::{DType, Frame, FrameData, Payload, PayloadKind};
-use crate::exec::{BuildError, Inputs, Node, NodeError, Outputs, ParamsExt, PortSet, PortSpec};
+use crate::exec::{
+    BuildError, Inputs, Node, NodeError, Outputs, ParamsExt, PortSet, PortSpec, Registry,
+};
 use crate::graph::Params;
 
 /// 1→1 stage that converts the input frame's dtype.
@@ -84,6 +86,10 @@ impl Node for CastStage {
         outputs.set("out", Payload::Frame(out));
         Ok(())
     }
+}
+
+pub fn register(reg: &mut Registry) {
+    reg.register_stage::<CastStage>("cast");
 }
 
 #[cfg(test)]

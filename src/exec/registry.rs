@@ -10,9 +10,6 @@ use std::collections::HashMap;
 use crate::exec::{Node, PortSet, ProcessorNode};
 use crate::graph::{NodeSpec, Params};
 use crate::processors::{Channel, ClearChannel, Grayscale, Invert};
-use crate::stages::{
-    BlendStage, CastStage, CropStage, ImageReadStage, ImageWriteStage, MergeStage, SplitStage,
-};
 use crate::traits::Processor;
 
 /// Errors raised while constructing a node from its spec.
@@ -170,14 +167,14 @@ impl Registry {
     }
 }
 
-/// A registry preloaded with the built-in stage kinds.
-///
-/// More kinds (crop/cast/split/merge) are registered as those stages land.
+/// A registry preloaded with the built-in stage kinds: everything in
+/// `src/stages/` (discovered by `build.rs`) plus the processor kinds.
 pub fn builtin_registry() -> Registry {
     let mut reg = Registry::new();
+    crate::stages::register_all(&mut reg);
 
-    reg.register("clear_channel", |p| {
-        let ch = match p.get_str("channel")? {
+    reg.register_processor("clear_channel", |p| {
+        Ok(ClearChannel(match p.get_str("channel")? {
             "red" => Channel::Red,
             "green" => Channel::Green,
             "blue" => Channel::Blue,
@@ -188,38 +185,10 @@ pub fn builtin_registry() -> Registry {
                     expected: "red|green|blue",
                 });
             }
-        };
-        Ok(Box::new(ProcessorNode::new(ClearChannel(ch))) as Box<dyn Node>)
+        }))
     });
-
-    reg.register("crop", |p| {
-        Ok(Box::new(CropStage::try_from(p)?) as Box<dyn Node>)
-    });
-    reg.register("cast", |p| {
-        Ok(Box::new(CastStage::try_from(p)?) as Box<dyn Node>)
-    });
-    reg.register("split", |p| {
-        Ok(Box::new(SplitStage::try_from(p)?) as Box<dyn Node>)
-    });
-    reg.register("merge", |p| {
-        Ok(Box::new(MergeStage::try_from(p)?) as Box<dyn Node>)
-    });
-
-    reg.register("grayscale", |_| {
-        Ok(Box::new(ProcessorNode::new(Grayscale)) as Box<dyn Node>)
-    });
-    reg.register("invert", |_| {
-        Ok(Box::new(ProcessorNode::new(Invert)) as Box<dyn Node>)
-    });
-    reg.register("blend", |p| {
-        Ok(Box::new(BlendStage::try_from(p)?) as Box<dyn Node>)
-    });
-    reg.register("image_read", |p| {
-        Ok(Box::new(ImageReadStage::try_from(p)?) as Box<dyn Node>)
-    });
-    reg.register("image_write", |p| {
-        Ok(Box::new(ImageWriteStage::try_from(p)?) as Box<dyn Node>)
-    });
+    reg.register_processor("grayscale", |_| Ok(Grayscale));
+    reg.register_processor("invert", |_| Ok(Invert));
 
     reg
 }
@@ -399,5 +368,47 @@ mod tests {
         reg.register("probe", |_| Ok(Box::new(Probe(5)) as Box<dyn Node>));
         let ports = reg.ports_of(&spec("probe", &[])).unwrap();
         assert_eq!(ports.outputs.len(), 5);
+    }
+
+    #[test]
+    fn builtin_registry_has_every_builtin_kind() {
+        let reg = builtin_registry();
+        let mut kinds: Vec<&str> = reg.registered_kinds().collect();
+        kinds.sort_unstable();
+        assert_eq!(
+            kinds,
+            [
+                "blend",
+                "cast",
+                "clear_channel",
+                "crop",
+                "grayscale",
+                "image_read",
+                "image_write",
+                "invert",
+                "merge",
+                "split",
+            ]
+        );
+    }
+
+    #[test]
+    fn register_all_covers_the_stage_folder() {
+        let mut reg = Registry::new();
+        crate::stages::register_all(&mut reg);
+        let mut kinds: Vec<&str> = reg.registered_kinds().collect();
+        kinds.sort_unstable();
+        assert_eq!(
+            kinds,
+            [
+                "blend",
+                "cast",
+                "crop",
+                "image_read",
+                "image_write",
+                "merge",
+                "split"
+            ]
+        );
     }
 }

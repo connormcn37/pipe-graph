@@ -2,7 +2,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::data::{Frame, FrameData, Payload, PayloadKind};
-use crate::exec::{BuildError, Inputs, Node, NodeError, Outputs, ParamsExt, PortSet, PortSpec};
+use crate::exec::{
+    BuildError, Inputs, Node, NodeError, Outputs, ParamsExt, PortSet, PortSpec, Registry,
+};
 use crate::graph::Params;
 use image::ColorType;
 
@@ -105,6 +107,11 @@ impl Node for ImageWriteStage {
 
         Ok(())
     }
+}
+
+pub fn register(reg: &mut Registry) {
+    reg.register_stage::<ImageReadStage>("image_read");
+    reg.register_stage::<ImageWriteStage>("image_write");
 }
 
 #[cfg(test)]
