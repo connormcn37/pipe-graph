@@ -10,6 +10,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_yaml = "0.9.34"
 toml = "1.1.6"
 image = "0.25.10"
+notify = "8.2.0"
 
 [features]
 # Default to headless core runtime.

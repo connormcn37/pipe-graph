@@ -1,8 +1,11 @@
 use clap::{Parser, Subcommand};
+use notify::{EventKind, RecursiveMode, Watcher};
 use pipe_graph::data::{Frame, FrameData, Payload};
 use pipe_graph::exec::{Runtime, builtin_registry};
 use pipe_graph::graph::{Graph, NodeId};
 use std::fs;
+use std::sync::mpsc;
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(name = "pipe-graph")]
@@ -39,6 +42,15 @@ enum Commands {
         /// Port ID to read the final output frame from
         #[arg(long, default_value = "out")]
         output_port: String,
+
+        /// Watch the file for changes and automatically re-run the pipeline
+        #[arg(short, long)]
+        watch: bool,
+    },
+    /// Launch the Bevy visual editor for the pipeline
+    Edit {
+        /// Path to the pipeline file
+        file: String,
     },
 }
 
@@ -51,6 +63,90 @@ fn load_graph(path: &str) -> Result<Graph, String> {
     } else {
         Err(format!("Unsupported file extension for {}", path))
     }
+}
+
+fn run_pipeline(
+    file: &str,
+    input_node: &str,
+    input_port: &str,
+    output_node: &str,
+    output_port: &str,
+) {
+    println!("\nLoading pipeline from {}...", file);
+    let graph = match load_graph(file) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("❌ Failed to load graph: {}", e);
+            return;
+        }
+    };
+    
+    let registry = builtin_registry();
+    let mut runtime = match Runtime::instantiate(&graph, &registry) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("❌ Graph compilation failed: {:?}", e);
+            return;
+        }
+    };
+    
+    // Create a small 2x2 RGB test pattern
+    let source = Frame::from_data(
+        2,
+        2,
+        3,
+        FrameData::U8(vec![1, 10, 100, 2, 20, 101, 3, 30, 102, 4, 40, 103]),
+    );
+    
+    println!("Pushing test frame into {}.{}...", input_node, input_port);
+    runtime.set_input(
+        &NodeId(input_node.to_string()),
+        input_port,
+        Payload::Frame(source.clone()),
+    );
+    
+    println!("Running pipeline...");
+    if let Err(e) = runtime.run_once() {
+        eprintln!("❌ Pipeline execution failed: {:?}", e);
+        return;
+    }
+    
+    println!("Reading output from {}.{}...", output_node, output_port);
+    let output_payload = runtime.output(&NodeId(output_node.to_string()), output_port);
+    
+    match output_payload {
+        Some(payload) => {
+            if let Some(frame) = payload.as_frame() {
+                println!("✅ Pipeline completed successfully!");
+                println!("  Output shape: {}x{}x{}", frame.width, frame.height, frame.channels);
+                println!("  Output data: {:?}", frame.data());
+            } else {
+                println!("✅ Pipeline completed, but output was not a Frame.");
+            }
+        }
+        None => {
+            eprintln!("❌ No output found at {}.{}", output_node, output_port);
+        }
+    }
+}
+
+#[cfg(feature = "bevy")]
+fn launch_editor(graph: Graph) {
+    use bevy::prelude::*;
+    use pipe_graph::systems::{PipeGraphEditorPlugin, GraphResource};
+
+    println!("Launching Bevy editor...");
+    App::new()
+        .add_plugins(DefaultPlugins)
+        .insert_resource(GraphResource(graph))
+        .add_plugins(PipeGraphEditorPlugin)
+        .run();
+}
+
+#[cfg(not(feature = "bevy"))]
+fn launch_editor(_graph: Graph) {
+    eprintln!("❌ Error: The editor requires the `bevy` feature. Re-run with `cargo run --features bevy -- edit <file>`.");
+    std::process::exit(1);
 }
 
 fn main() {
@@ -80,58 +176,46 @@ fn main() {
                 }
             }
         }
-        Commands::Run { file, input_node, input_port, output_node, output_port } => {
-            println!("Loading pipeline from {}...", file);
-            let graph = load_graph(file).unwrap_or_else(|e| {
-                eprintln!("❌ Failed to load graph: {}", e);
-                std::process::exit(1);
-            });
+        Commands::Run { file, input_node, input_port, output_node, output_port, watch } => {
+            run_pipeline(file, input_node, input_port, output_node, output_port);
             
-            let registry = builtin_registry();
-            let mut runtime = Runtime::instantiate(&graph, &registry).unwrap_or_else(|e| {
-                eprintln!("❌ Graph compilation failed: {:?}", e);
-                std::process::exit(1);
-            });
-            
-            // Create a small 2x2 RGB test pattern
-            let source = Frame::from_data(
-                2,
-                2,
-                3,
-                FrameData::U8(vec![1, 10, 100, 2, 20, 101, 3, 30, 102, 4, 40, 103]),
-            );
-            
-            println!("Pushing test frame into {}.{}...", input_node, input_port);
-            runtime.set_input(
-                &NodeId(input_node.clone()),
-                input_port,
-                Payload::Frame(source.clone()),
-            );
-            
-            println!("Running pipeline...");
-            runtime.run_once().unwrap_or_else(|e| {
-                eprintln!("❌ Pipeline execution failed: {:?}", e);
-                std::process::exit(1);
-            });
-            
-            println!("Reading output from {}.{}...", output_node, output_port);
-            let output_payload = runtime.output(&NodeId(output_node.clone()), output_port);
-            
-            match output_payload {
-                Some(payload) => {
-                    if let Some(frame) = payload.as_frame() {
-                        println!("✅ Pipeline completed successfully!");
-                        println!("  Output shape: {}x{}x{}", frame.width, frame.height, frame.channels);
-                        println!("  Output data: {:?}", frame.data());
-                    } else {
-                        println!("✅ Pipeline completed, but output was not a Frame.");
+            if *watch {
+                println!("\n👀 Watching {} for changes...", file);
+                let (tx, rx) = mpsc::channel();
+                let mut watcher = notify::recommended_watcher(tx).unwrap();
+                
+                let path = std::path::Path::new(file);
+                watcher.watch(path, RecursiveMode::NonRecursive).unwrap();
+
+                loop {
+                    match rx.recv() {
+                        Ok(Ok(event)) => {
+                            // Only trigger on modify events
+                            if !matches!(event.kind, EventKind::Access(_)) {
+                                // Add a tiny debounce to let the file write finish
+                                std::thread::sleep(Duration::from_millis(100));
+                                run_pipeline(file, input_node, input_port, output_node, output_port);
+                            }
+                        }
+                        Ok(Err(e)) => eprintln!("Watch error: {:?}", e),
+                        Err(e) => {
+                            eprintln!("Channel error: {:?}", e);
+                            break;
+                        }
                     }
                 }
-                None => {
-                    eprintln!("❌ No output found at {}.{}", output_node, output_port);
-                    std::process::exit(1);
-                }
             }
+        }
+        Commands::Edit { file } => {
+            println!("Loading pipeline from {}...", file);
+            let graph = match load_graph(file) {
+                Ok(g) => g,
+                Err(e) => {
+                    eprintln!("Warning: failed to load graph ({}), starting with an empty graph.", e);
+                    Graph::new()
+                }
+            };
+            launch_editor(graph);
         }
     }
 }
