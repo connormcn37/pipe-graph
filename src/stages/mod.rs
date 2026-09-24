@@ -15,11 +15,13 @@ mod cast;
 mod crop;
 mod merge;
 mod split;
+mod image_io;
 
 pub use self::cast::CastStage;
 pub use self::crop::CropStage;
 pub use self::merge::MergeStage;
 pub use self::split::SplitStage;
+pub use self::image_io::{ImageReadStage, ImageWriteStage};
 
 #[cfg(test)]
 mod tests {

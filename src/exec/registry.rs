@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use crate::exec::{Node, PortSet, ProcessorNode};
 use crate::graph::{NodeSpec, Params};
 use crate::processors::{Channel, ClearChannel, Grayscale, Invert};
-use crate::stages::{BlendStage, CastStage, CropStage, MergeStage, SplitStage};
+use crate::stages::{BlendStage, CastStage, CropStage, MergeStage, SplitStage, ImageReadStage, ImageWriteStage};
 
 /// Errors raised while constructing a node from its spec.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,6 +177,12 @@ pub fn builtin_registry() -> Registry {
     reg.register("blend", |p| {
         Ok(Box::new(BlendStage::try_from(p)?) as Box<dyn Node>)
     });
+    reg.register("image_read", |p| {
+        Ok(Box::new(ImageReadStage::try_from(p)?) as Box<dyn Node>)
+    });
+    reg.register("image_write", |p| {
+        Ok(Box::new(ImageWriteStage::try_from(p)?) as Box<dyn Node>)
+    });
 
     reg
 }
@@ -268,3 +274,4 @@ mod tests {
         ));
     }
 }
+
