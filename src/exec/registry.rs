@@ -9,8 +9,8 @@ use std::collections::HashMap;
 
 use crate::exec::{Node, PortSet, ProcessorNode};
 use crate::graph::{NodeSpec, Params};
-use crate::processors::{Channel, ClearChannel};
-use crate::stages::{CastStage, CropStage, MergeStage, SplitStage};
+use crate::processors::{Channel, ClearChannel, Grayscale, Invert};
+use crate::stages::{BlendStage, CastStage, CropStage, MergeStage, SplitStage};
 
 /// Errors raised while constructing a node from its spec.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,6 +161,16 @@ pub fn builtin_registry() -> Registry {
     });
     reg.register("merge", |p| {
         Ok(Box::new(MergeStage::try_from(p)?) as Box<dyn Node>)
+    });
+
+    reg.register("grayscale", |_| {
+        Ok(Box::new(ProcessorNode::new(Grayscale)) as Box<dyn Node>)
+    });
+    reg.register("invert", |_| {
+        Ok(Box::new(ProcessorNode::new(Invert)) as Box<dyn Node>)
+    });
+    reg.register("blend", |p| {
+        Ok(Box::new(BlendStage::try_from(p)?) as Box<dyn Node>)
     });
 
     reg
