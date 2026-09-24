@@ -15,10 +15,13 @@
 //! }
 //! ```
 //!
-//! The module name must be a snake_case Rust identifier. Registering a kind
+//! The module name must be a snake_case Rust identifier. A stage with
+//! submodules must be a `<name>/mod.rs` folder: a `<name>.rs` file is loaded
+//! via `#[path]`, so its `mod x;` would resolve to `src/stages/x.rs` (the
+//! build rejects `<name>.rs` beside a `<name>/` folder). Registering a kind
 //! that another stage already registered panics at startup (and in `cargo
-//! test`). Stage files are not reached by `cargo fmt`; run
-//! `rustfmt --edition 2024 src/stages/*.rs` (CI checks it).
+//! test`). Stage files are not reached by `cargo fmt`; format them with the
+//! bash or PowerShell command in the README (CI checks them).
 //!
 //! Split/Merge declare a param-dependent number of ports (`out0..`, `in0..`),
 //! which is exactly why [`crate::exec::Node::ports`] takes `&self`.

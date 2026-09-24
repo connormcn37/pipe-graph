@@ -110,10 +110,25 @@ pub fn register(reg: &mut Registry) {
 }
 ```
 
-`<name>` must be a snake_case Rust identifier; a multi-file stage can be a
-`<name>/mod.rs` folder instead. Two stages registering the same kind panic at
-startup. `cargo fmt` does not reach stage files, so also run
-`rustfmt --edition 2024 src/stages/*.rs`.
+`<name>` must be a snake_case Rust identifier. A stage that needs submodules
+must be a `<name>/mod.rs` folder: a `<name>.rs` file cannot declare `mod`
+children (it is loaded via `#[path]`, so `mod x;` would look for
+`src/stages/x.rs`, which is itself taken for a stage), and the build rejects
+`<name>.rs` next to a `<name>/` folder. Other folders without a `mod.rs`
+(e.g. shader sources) are ignored. Two stages registering the same kind panic
+at startup.
+
+`cargo fmt` does not reach stage files, so after it also run:
+
+```sh
+# bash
+find src/stages -name '*.rs' -print0 | xargs -0 rustfmt --edition 2024
+```
+
+```powershell
+# PowerShell
+Get-ChildItem src/stages -Recurse -Filter *.rs | ForEach-Object { rustfmt --edition 2024 $_.FullName }
+```
 
 ### Pipeline files
 
