@@ -76,3 +76,6 @@ mod tests {
         assert_eq!(merged.get("out").unwrap().as_frame().unwrap(), &src);
     }
 }
+mod blend;
+pub use self::blend::*;
+

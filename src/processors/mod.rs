@@ -3,3 +3,9 @@ pub use self::clear_channel::*;
 
 mod process_list;
 pub use self::process_list::*;
+mod grayscale;
+pub use self::grayscale::*;
+
+mod invert;
+pub use self::invert::*;
+
