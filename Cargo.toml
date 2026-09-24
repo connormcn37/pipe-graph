@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 bevy = { version = "0.18.0", optional = true }
+image = "0.25.10"
 
 [features]
 # Default to headless core runtime.
