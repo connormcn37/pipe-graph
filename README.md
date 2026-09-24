@@ -75,9 +75,11 @@ Bevy); UI frontends adapt to it. The pieces:
     once with `latest_with_seq()`. A node that re-emits a cached buffer should
     publish it with `Outputs::set_shared` to keep that pointer identity stable
     through the scheduler.
-- **`stages`** — the registered node kinds: `crop`, `cast`, `split`, `merge`,
-  `blend`, `image_read`, `image_write`, plus the `Processor`-backed
-  `clear_channel`, `grayscale` and `invert`.
+- **`stages`** — every node kind, one module per file, **discovered
+  automatically** by `build.rs` (see *Adding a stage*): `crop`, `cast`,
+  `split`, `merge`, `blend`, `image_read`, `image_write`, and the
+  `Processor`-backed `clear_channel`, `grayscale`, `invert`.
+- **`processors`** — `ProcessList`, which chains `Processor`s.
 - **`editor`** — Bevy-free controller logic: `EditorCommand`/`apply_command`
   (route user intents through the core `Graph`) and `view_diff` (which node
   views a frontend should spawn/despawn to mirror the graph).
@@ -91,6 +93,27 @@ Realizing the vision above: an `Entity`'s `label` is a `NodeId`; its `inputs` /
 are `NodeSpec.params`; `get_last_frame` / `push_frame` are now
 `EdgeBuffer::get_last` / `push`; and a `Pipeline` is a `Graph` executed by a
 `Runtime`.
+
+### Adding a stage
+
+Create `src/stages/<name>.rs` and rebuild — nothing else to edit. The file
+needs one `register` fn; `build.rs` declares the module and calls it:
+
+```rust
+use crate::exec::Registry;
+
+pub fn register(reg: &mut Registry) {
+    // A `Node` that implements `TryFrom<&Params>`:
+    reg.register_stage::<MyStage>("my_stage");
+    // Or a single-in/single-out `Processor`:
+    // reg.register_processor("my_filter", |_params| Ok(MyFilter));
+}
+```
+
+`<name>` must be a snake_case Rust identifier; a multi-file stage can be a
+`<name>/mod.rs` folder instead. Two stages registering the same kind panic at
+startup. `cargo fmt` does not reach stage files, so also run
+`rustfmt --edition 2024 src/stages/*.rs`.
 
 ### Pipeline files
 
