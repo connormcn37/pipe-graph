@@ -359,7 +359,28 @@ pub struct Runtime {
     /// observed. Derived from the plan and the observed set; see
     /// [`Runtime::fusable_runs`].
     fusable: Vec<Vec<usize>>,
+    /// Each component's part in [`Runtime::fusable`], indexed like
+    /// [`Plan::components`]; derived alongside it.
+    fused_role: Vec<FusedRole>,
+    /// Whether `run_once` evaluates fusable runs as a unit. See
+    /// [`Runtime::set_fusion`].
+    fusion: bool,
+    /// `(input, output)` port of every node declaring exactly one of each: the
+    /// nodes eligible for [`Node::eval_in_place`]. Ports are fixed per built
+    /// node, so this is computed once rather than calling `ports()` per eval.
+    single_io: HashMap<NodeId, (PortId, PortId)>,
     max_iters: u32,
+}
+
+/// How a component takes part in fused execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FusedRole {
+    /// Not in any fusable run: evaluated on its own.
+    Alone,
+    /// First component of fusable run `.0`: the whole run is evaluated here.
+    Head(usize),
+    /// A later member of a run, already evaluated with its head.
+    Member,
 }
 
 impl Runtime {
@@ -397,6 +418,18 @@ impl Runtime {
         }
 
         let terminal = terminal_ports(graph, &plan, &nodes);
+        let single_io = nodes
+            .iter()
+            .filter_map(|(id, node)| {
+                let ports = node.ports();
+                match (ports.inputs.as_slice(), ports.outputs.as_slice()) {
+                    ([input], [output]) => {
+                        Some((id.clone(), (input.id.clone(), output.id.clone())))
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
 
         let mut runtime = Self {
             plan,
@@ -411,6 +444,9 @@ impl Runtime {
             terminal,
             capture_all: false,
             fusable: Vec::new(),
+            fused_role: Vec::new(),
+            fusion: true,
+            single_io,
             max_iters: DEFAULT_MAX_ITERS,
         };
         runtime.recompute_fusable();
@@ -424,6 +460,44 @@ impl Runtime {
     /// Bound on iterations per cyclic component within one `run_once`.
     pub fn set_max_iters(&mut self, n: u32) {
         self.max_iters = n;
+    }
+
+    /// Turn fused execution of [`Runtime::fusable_runs`] on or off (default:
+    /// **on**).
+    ///
+    /// With fusion on, `run_once` evaluates each fusable run as a unit: the
+    /// values passed between its members go straight from one node to the next
+    /// and are never written to their (private, unobserved) edge buffers, and
+    /// a 1-in/1-out member whose input is uniquely owned is evaluated in place
+    /// via [`Node::eval_in_place`] instead of on a copy. Everything observable —
+    /// final and watched outputs, taps, errors and the node they name — is the
+    /// same either way; turning it off is for comparison and diagnostics.
+    ///
+    /// One deliberate difference: a link inside a run holds no value between
+    /// runs, so a producer that publishes *nothing* on a fused link presents
+    /// its consumer with a missing input, where the unfused path would replay
+    /// the edge's stale value from an earlier run.
+    pub fn set_fusion(&mut self, enabled: bool) {
+        self.fusion = enabled;
+    }
+
+    /// Whether fused execution is on. See [`Runtime::set_fusion`].
+    pub fn fusion_enabled(&self) -> bool {
+        self.fusion
+    }
+
+    /// Read-only view of the buffer on the edge `from -> to`, if that edge
+    /// exists. For tests and diagnostics: e.g. a private link inside a fused
+    /// run stays empty, because its value never materializes.
+    pub fn edge_buffer(
+        &self,
+        from: &(NodeId, PortId),
+        to: &(NodeId, PortId),
+    ) -> Option<&EdgeBuffer> {
+        self.edges
+            .iter()
+            .find(|e| e.from == *from && e.to == *to)
+            .map(|e| &e.buffer)
     }
 
     /// Inject a value on a node's input port (feeds "source" nodes whose input
@@ -623,6 +697,14 @@ impl Runtime {
             .iter()
             .flat_map(|chain| self.split_chain(chain))
             .collect();
+
+        self.fused_role = vec![FusedRole::Alone; self.plan.components.len()];
+        for (r, run) in self.fusable.iter().enumerate() {
+            self.fused_role[run[0]] = FusedRole::Head(r);
+            for &member in &run[1..] {
+                self.fused_role[member] = FusedRole::Member;
+            }
+        }
     }
 
     /// Clear all edge buffers and captured outputs, and reset node state.
@@ -646,6 +728,16 @@ impl Runtime {
     /// Execute the whole plan once (acyclic steps once; cyclic steps iterate).
     pub fn run_once(&mut self) -> Result<(), RunError> {
         for ci in 0..self.plan.components.len() {
+            if self.fusion {
+                match self.fused_role[ci] {
+                    FusedRole::Head(run) => {
+                        self.run_fused(run)?;
+                        continue;
+                    }
+                    FusedRole::Member => continue,
+                    FusedRole::Alone => {}
+                }
+            }
             match self.plan.components[ci].clone() {
                 Component::Acyclic(id) => self.eval_node(&id)?,
                 Component::Cyclic { nodes } => self.run_cyclic(&nodes)?,
@@ -698,6 +790,160 @@ impl Runtime {
         Ok(())
     }
 
+    /// Evaluate fusable run `run` (an index into [`Runtime::fusable_runs`]) as
+    /// a unit.
+    ///
+    /// What [`Plan::linear_chains`] and [`Runtime::fusable_runs`] guarantee,
+    /// and why it makes this valid:
+    ///
+    /// - Every member is a single acyclic node, and every member after the head
+    ///   has the previous member as its *only* predecessor component. So all of
+    ///   a non-head member's incoming edges come from the previous member (there
+    ///   may be several, e.g. one output fanned into two ports), and the whole
+    ///   run can be evaluated where the head sits in the serial order.
+    /// - Every member before the last has the next member as its only
+    ///   successor component, so all of its outgoing edges are private links,
+    ///   and none of the ports carrying them is observed.
+    ///
+    /// What it does *not* guarantee: a member may also have external inputs
+    /// ([`Runtime::set_input`]), several input ports, or extra output ports
+    /// that go nowhere (terminal, hence captured). Those are handled exactly as
+    /// the serial path handles them; only the specific case of a 1-in/1-out
+    /// node fed by one link qualifies for [`Node::eval_in_place`].
+    ///
+    /// Within the run, members are evaluated, published to taps and captured
+    /// in the same order and with the same values as the serial path, so a
+    /// failing member is reported as [`RunError::node`] and the members before
+    /// it remain observable. (Components *unrelated* to the run that the flat
+    /// order happens to interleave with it now run after the whole run; no
+    /// data flows between them, so only which of two independent failures is
+    /// reported first can differ.)
+    fn run_fused(&mut self, run: usize) -> Result<(), RunError> {
+        let ids: Vec<NodeId> = self.fusable[run]
+            .iter()
+            .map(|&ci| match &self.plan.components[ci] {
+                Component::Acyclic(id) => id.clone(),
+                Component::Cyclic { .. } => unreachable!("fusable runs are acyclic"),
+            })
+            .collect();
+        let (head, rest) = ids.split_first().expect("a fusable run is non-empty");
+
+        // The head reads from ordinary (non-private) buffers.
+        let inputs = self.gather(head);
+        let mut outputs = self.eval_with(head, &inputs)?;
+        let mut prev = head;
+        for id in rest {
+            let carried = self.hand_off(prev, outputs);
+            outputs = self.eval_fused_member(id, carried)?;
+            prev = id;
+        }
+        // The tail's outputs leave the run: materialize them as usual.
+        self.commit(prev, outputs);
+        Ok(())
+    }
+
+    /// Call `id`'s [`Node::eval`] on `inputs`, attributing a failure to `id`.
+    fn eval_with(&mut self, id: &NodeId, inputs: &Inputs) -> Result<Outputs, RunError> {
+        let mut outputs = Outputs::new();
+        let node = self.nodes.get_mut(id).expect("compiled node exists");
+        node.eval(inputs, &mut outputs).map_err(|error| RunError {
+            node: id.clone(),
+            error,
+        })?;
+        Ok(outputs)
+    }
+
+    /// Finish a non-tail member of a fused run: publish its outputs to taps and
+    /// capture what is observed (as [`Runtime::commit`] would), but hand the
+    /// values to the next member instead of writing its private edges.
+    ///
+    /// Those edges are cleared rather than left alone, so a value written
+    /// before this run became fusable (fusion off, or a since-removed tap) is
+    /// not pinned in memory or mistaken for a current one.
+    fn hand_off(&mut self, id: &NodeId, outputs: Outputs) -> HashMap<PortId, Arc<Payload>> {
+        let arced = outputs.into_map();
+        if let Some(out_edges) = self.outgoing.get(id) {
+            for &i in out_edges {
+                self.edges[i].buffer.clear();
+            }
+        }
+        self.publish(id, &arced);
+        arced
+    }
+
+    /// Evaluate a non-head member of a fused run, given the previous member's
+    /// outputs (`carried`) in place of its incoming edge buffers.
+    ///
+    /// Inputs are assembled with [`Runtime::gather`]'s precedence (external
+    /// values first, edges override), but each payload is moved out of its
+    /// `Arc` when this is the only reference rather than always cloned. For a
+    /// 1-in/1-out node fed by a single link this lets
+    /// [`Node::eval_in_place`] transform the previous member's buffer directly.
+    /// A shared value — a producer that caches its output via
+    /// [`Outputs::set_shared`], or one output fanned into two ports — is
+    /// cloned first, exactly as `gather` would.
+    fn eval_fused_member(
+        &mut self,
+        id: &NodeId,
+        carried: HashMap<PortId, Arc<Payload>>,
+    ) -> Result<Outputs, RunError> {
+        let in_edges: &[usize] = self.incoming.get(id).map_or(&[], Vec::as_slice);
+
+        let mut shared: HashMap<PortId, Arc<Payload>> =
+            self.external.get(id).cloned().unwrap_or_default();
+        for &i in in_edges {
+            let edge = &self.edges[i];
+            if let Some(value) = carried.get(&edge.from.1) {
+                shared.insert(edge.to.1.clone(), value.clone());
+            }
+        }
+        // Release the previous member's handles so a value only this node now
+        // holds is recognised as uniquely owned below.
+        drop(carried);
+
+        let in_place = match (self.single_io.get(id), in_edges) {
+            (Some((input, output)), &[only]) if self.edges[only].to.1 == *input => {
+                Some((input.clone(), output.clone()))
+            }
+            _ => None,
+        };
+
+        let mut values: HashMap<PortId, Payload> = shared
+            .into_iter()
+            .map(|(port, value)| {
+                let owned = Arc::try_unwrap(value).unwrap_or_else(|v| v.as_ref().clone());
+                (port, owned)
+            })
+            .collect();
+
+        let fail = |error| RunError {
+            node: id.clone(),
+            error,
+        };
+        let node = self.nodes.get_mut(id).expect("compiled node exists");
+        if let Some((input, output)) = in_place
+            && let Some(mut payload) = values.remove(&input)
+        {
+            match node.eval_in_place(&mut payload) {
+                Some(Ok(())) => {
+                    let mut outputs = Outputs::new();
+                    outputs.set(&output.0, payload);
+                    return Ok(outputs);
+                }
+                Some(Err(error)) => return Err(fail(error)),
+                // Unsupported: fall through to `eval` with the value restored.
+                None => {
+                    values.insert(input, payload);
+                }
+            }
+        }
+
+        let mut outputs = Outputs::new();
+        node.eval(&Inputs::new(values), &mut outputs)
+            .map_err(fail)?;
+        Ok(outputs)
+    }
+
     fn gather(&self, id: &NodeId) -> Inputs {
         let mut values: HashMap<PortId, Payload> = HashMap::new();
         // External inputs first; edge values override where both exist.
@@ -724,17 +970,25 @@ impl Runtime {
         // detectable downstream with `Arc::ptr_eq`.
         let arced: HashMap<PortId, Arc<Payload>> = outputs.into_map();
 
-        let out_edges = self.outgoing.get(id).cloned().unwrap_or_default();
-        for i in out_edges {
-            let port = self.edges[i].from.1.clone();
-            if let Some(shared) = arced.get(&port) {
-                self.edges[i].buffer.push_arc(shared.clone());
+        if let Some(out_edges) = self.outgoing.get(id) {
+            for &i in out_edges {
+                let edge = &mut self.edges[i];
+                if let Some(shared) = arced.get(&edge.from.1) {
+                    edge.buffer.push_arc(shared.clone());
+                }
             }
         }
+        self.publish(id, &arced);
+    }
 
+    /// The observer half of [`Runtime::commit`]: publish `id`'s outputs to its
+    /// taps and capture whatever is observed, without touching edge buffers.
+    /// The fused path calls this alone for a run's inner members, whose links
+    /// never materialize.
+    fn publish(&mut self, id: &NodeId, arced: &HashMap<PortId, Arc<Payload>>) {
         // Publish to any live-preview taps (non-blocking: a quick lock+store).
         if let Some(node_taps) = self.taps.get(id) {
-            for (port, shared) in &arced {
+            for (port, shared) in arced {
                 if let Some(taps) = node_taps.get(port) {
                     for tap in taps {
                         tap.publish(shared.clone());
@@ -748,8 +1002,9 @@ impl Runtime {
         // materialize, so keeping it here would defeat the optimization (and
         // pins a frame in memory for a reader that never comes).
         let captured: HashMap<PortId, Arc<Payload>> = arced
-            .into_iter()
+            .iter()
             .filter(|(port, _)| self.observes(id, port))
+            .map(|(port, shared)| (port.clone(), shared.clone()))
             .collect();
         if captured.is_empty() {
             self.node_outputs.remove(id);

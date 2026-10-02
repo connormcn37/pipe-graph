@@ -68,6 +68,12 @@ Bevy); UI frontends adapt to it. The pieces:
     unconditional behaviour while debugging). What is observed is exactly what
     a fusing executor may not eliminate, so the two are one set rather than
     two.
+  - **Fused runs.** `run_once` evaluates each fusable run as a unit: payloads
+    pass node to node and the private edge buffers between them stay empty.
+    A 1-in/1-out node can opt into `Node::eval_in_place` (`ProcessorNode`,
+    `CropStage`, identity `CastStage` do), transforming a uniquely owned
+    payload without a copy; shared payloads are cloned first. Outputs, taps and
+    errors match the serial path; `Runtime::set_fusion(false)` turns it off.
   - `Tap` — non-blocking latest-value previews on any output port, carrying a
     monotonic `seq`. `seq` counts *publishes*, so a still image broadcast into
     a stream still reads as live; `Arc::ptr_eq` on the payload answers the

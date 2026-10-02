@@ -84,6 +84,18 @@ impl Node for CastStage {
         outputs.set("out", Payload::Frame(out));
         Ok(())
     }
+
+    /// Only the identity case is done in place: casting to the dtype a frame
+    /// already has is a no-op instead of a copy. A real conversion needs a new
+    /// buffer of a different element type either way, so it declines and lets
+    /// `eval` build one (the scheduler moves the input in, so that costs no
+    /// extra clone).
+    fn eval_in_place(&mut self, payload: &mut Payload) -> Option<Result<(), NodeError>> {
+        match payload {
+            Payload::Frame(frame) if frame.dtype() == self.dtype => Some(Ok(())),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -123,5 +135,23 @@ mod tests {
         let f = Frame::from_rgb8(1, 1, vec![(3, 4, 5)]);
         let out = run(&mut CastStage::new(DType::U8, None), f.clone());
         assert_eq!(out, f);
+    }
+
+    #[test]
+    fn in_place_handles_identity_and_defers_conversions() {
+        let f = Frame::from_rgb8(1, 1, vec![(3, 4, 5)]);
+        let mut payload = Payload::Frame(f.clone());
+        assert_eq!(
+            CastStage::new(DType::U8, None).eval_in_place(&mut payload),
+            Some(Ok(()))
+        );
+        assert_eq!(payload.as_frame().unwrap(), &f);
+
+        // A real conversion declines and leaves the payload untouched.
+        assert_eq!(
+            CastStage::new(DType::F32, None).eval_in_place(&mut payload),
+            None
+        );
+        assert_eq!(payload.as_frame().unwrap(), &f);
     }
 }
