@@ -68,6 +68,12 @@ Bevy); UI frontends adapt to it. The pieces:
     unconditional behaviour while debugging). What is observed is exactly what
     a fusing executor may not eliminate, so the two are one set rather than
     two.
+  - **Parallel execution** — `Runtime::set_exec_mode(ExecMode::Parallel { threads })`
+    (default `Serial`) groups components into dependency levels
+    (`Plan::levels`) and evaluates a level's acyclic nodes concurrently on
+    `std::thread::scope` threads; inputs are gathered and outputs committed
+    serially in component order, so a successful run's results and tap
+    `seq`s match serial exactly. Hence `Node: Send` (and `Processor: Send`).
   - `Tap` — non-blocking latest-value previews on any output port, carrying a
     monotonic `seq`. `seq` counts *publishes*, so a still image broadcast into
     a stream still reads as live; `Arc::ptr_eq` on the payload answers the

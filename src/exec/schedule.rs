@@ -14,18 +14,52 @@
 //! Jacobi-style update — every node in the component is evaluated against the
 //! previous iteration's buffers, then all results are committed together — so a
 //! feedback edge naturally reads the previous tick's value.
+//!
+//! Execution is serial by default. [`ExecMode::Parallel`] instead walks the
+//! condensation level by level ([`Plan::levels`]) and evaluates the acyclic
+//! nodes of a level concurrently on scoped threads; see
+//! [`Runtime::set_exec_mode`].
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::data::Payload;
 use crate::exec::{
-    BuildError, EdgeBuffer, Inputs, Node, Outputs, Registry, Tap, ValidationError, validate,
+    BuildError, EdgeBuffer, Inputs, Node, NodeError, Outputs, Registry, Tap, ValidationError,
+    validate,
 };
 use crate::graph::{EdgeId, Graph, NodeId, PortId};
 
 /// Default bound on iterations for a cyclic component within one `run_once`.
 pub const DEFAULT_MAX_ITERS: u32 = 16;
+
+/// How [`Runtime::run_once`] evaluates the plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExecMode {
+    /// One component at a time, in [`Plan::components`] order. The default:
+    /// zero threading overhead, and the reference behaviour the parallel mode
+    /// must reproduce.
+    #[default]
+    Serial,
+    /// Evaluate independent acyclic nodes concurrently, at most `threads` at
+    /// once (`0` is treated as `1`). For a run that succeeds, outputs,
+    /// captured values and tap sequence numbers are identical to
+    /// [`ExecMode::Serial`]; only wall-clock time differs. (A run that fails
+    /// reports the same kind of error but may leave different partial state;
+    /// see [`Runtime::set_exec_mode`].) Worth it when sibling branches are individually
+    /// expensive (per-frame filters on a fan-out), not for cheap nodes, where
+    /// spawning threads costs more than it saves.
+    Parallel { threads: usize },
+}
+
+impl ExecMode {
+    /// [`ExecMode::Parallel`] sized to the machine's available parallelism
+    /// (falling back to 1 if it cannot be determined).
+    pub fn parallel() -> Self {
+        let threads = std::thread::available_parallelism().map_or(1, usize::from);
+        ExecMode::Parallel { threads }
+    }
+}
 
 /// One execution step in a compiled [`Plan`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +130,33 @@ impl Plan {
             .filter(|(_, to)| *to == component)
             .map(|(from, _)| *from)
             .collect()
+    }
+
+    /// Components grouped into dependency *levels*: a component's level is the
+    /// length of the longest dependency path reaching it from a source.
+    ///
+    /// No component depends on another in the same level (any dependency
+    /// would put the consumer at least one level deeper), so a level's members
+    /// can run in any order — or at the same time — once every earlier level
+    /// has finished. In a diamond the two branches share a level. Each level
+    /// lists its components in ascending index order, which keeps parallel
+    /// execution's commit order deterministic.
+    pub fn levels(&self) -> Vec<Vec<usize>> {
+        let mut level = vec![0usize; self.components.len()];
+        // `deps` is sorted by producer, and components are in topological
+        // order (every producer's index is below its consumer's), so all of a
+        // producer's own inbound deps are processed before its outbound ones:
+        // its level is final by the time it is read.
+        for &(from, to) in &self.deps {
+            debug_assert!(from < to, "condensation is topologically indexed");
+            level[to] = level[to].max(level[from] + 1);
+        }
+        let depth = level.iter().max().map_or(0, |&l| l + 1);
+        let mut levels = vec![Vec::new(); depth];
+        for (ci, &l) in level.iter().enumerate() {
+            levels[l].push(ci);
+        }
+        levels
     }
 
     /// Maximal runs of components chained strictly one-to-one: every component
@@ -360,6 +421,10 @@ pub struct Runtime {
     /// [`Runtime::fusable_runs`].
     fusable: Vec<Vec<usize>>,
     max_iters: u32,
+    /// Serial or level-parallel evaluation; see [`Runtime::set_exec_mode`].
+    exec_mode: ExecMode,
+    /// [`Plan::levels`], cached: the plan never changes for this runtime.
+    levels: Vec<Vec<usize>>,
 }
 
 impl Runtime {
@@ -397,6 +462,7 @@ impl Runtime {
         }
 
         let terminal = terminal_ports(graph, &plan, &nodes);
+        let levels = plan.levels();
 
         let mut runtime = Self {
             plan,
@@ -412,6 +478,8 @@ impl Runtime {
             capture_all: false,
             fusable: Vec::new(),
             max_iters: DEFAULT_MAX_ITERS,
+            exec_mode: ExecMode::Serial,
+            levels,
         };
         runtime.recompute_fusable();
         Ok(runtime)
@@ -424,6 +492,33 @@ impl Runtime {
     /// Bound on iterations per cyclic component within one `run_once`.
     pub fn set_max_iters(&mut self, n: u32) {
         self.max_iters = n;
+    }
+
+    /// Choose how [`Runtime::run_once`] evaluates the plan (default
+    /// [`ExecMode::Serial`]).
+    ///
+    /// Switching is cheap and safe at any point, including mid-stream: it
+    /// rebuilds nothing, so node state, edge buffers and taps carry over.
+    /// When a run succeeds, parallel mode is observably equivalent to serial —
+    /// same outputs, same captured values, same tap `seq`s — because nodes in
+    /// one level never read each other's outputs, and results are committed
+    /// back in component order on the calling thread.
+    ///
+    /// When a node fails, the partial state differs. Serial stops at the
+    /// first failing component in [`Plan::components`] order. Parallel runs
+    /// level by level, so by then it may already have evaluated and committed
+    /// independent components that serial would not yet have reached, and
+    /// evaluated (without committing) the rest of the failing node's batch.
+    /// The error returned names the first failing node of that batch, which
+    /// can differ from serial's when several independent nodes fail in the
+    /// same run. Call [`Runtime::reset`] to get back to a known state.
+    pub fn set_exec_mode(&mut self, mode: ExecMode) {
+        self.exec_mode = mode;
+    }
+
+    /// The current [`ExecMode`].
+    pub fn exec_mode(&self) -> ExecMode {
+        self.exec_mode
     }
 
     /// Inject a value on a node's input port (feeds "source" nodes whose input
@@ -645,6 +740,9 @@ impl Runtime {
 
     /// Execute the whole plan once (acyclic steps once; cyclic steps iterate).
     pub fn run_once(&mut self) -> Result<(), RunError> {
+        if let ExecMode::Parallel { threads } = self.exec_mode {
+            return self.run_parallel(threads);
+        }
         for ci in 0..self.plan.components.len() {
             match self.plan.components[ci].clone() {
                 Component::Acyclic(id) => self.eval_node(&id)?,
@@ -673,6 +771,114 @@ impl Runtime {
             })?;
         }
         self.commit(id, outputs);
+        Ok(())
+    }
+
+    /// [`ExecMode::Parallel`]: walk [`Plan::levels`] in order. Within a level,
+    /// consecutive acyclic components are batched (up to `threads`) and
+    /// evaluated concurrently by [`Runtime::eval_batch`]; a cyclic component
+    /// flushes the pending batch and then runs exactly as in serial mode, so
+    /// components still start in ascending index order within the level.
+    fn run_parallel(&mut self, threads: usize) -> Result<(), RunError> {
+        let cap = threads.max(1);
+        let mut batch: Vec<NodeId> = Vec::with_capacity(cap);
+        for li in 0..self.levels.len() {
+            for k in 0..self.levels[li].len() {
+                let ci = self.levels[li][k];
+                match &self.plan.components[ci] {
+                    Component::Acyclic(id) => {
+                        batch.push(id.clone());
+                        if batch.len() == cap {
+                            self.eval_batch(&batch)?;
+                            batch.clear();
+                        }
+                    }
+                    Component::Cyclic { nodes } => {
+                        let nodes = nodes.clone();
+                        if !batch.is_empty() {
+                            self.eval_batch(&batch)?;
+                            batch.clear();
+                        }
+                        self.run_cyclic(&nodes)?;
+                    }
+                }
+            }
+            // A level is a barrier: the next one may read anything this one
+            // produced, so everything here is committed before moving on.
+            if !batch.is_empty() {
+                self.eval_batch(&batch)?;
+                batch.clear();
+            }
+        }
+        Ok(())
+    }
+
+    /// Evaluate mutually independent acyclic nodes concurrently.
+    ///
+    /// Three phases, only the middle one threaded:
+    /// 1. **Gather** every node's inputs serially. Nothing in the batch feeds
+    ///    anything else in it, so these are exactly the inputs a serial run
+    ///    would see.
+    /// 2. **Eval** on `std::thread::scope` threads (the calling thread takes
+    ///    the first node). Each thread gets a disjoint `&mut` to one node and
+    ///    a shared `&Inputs`; nothing else in the runtime is touched, which is
+    ///    why `Node: Send` is all that is required.
+    /// 3. **Commit** serially in batch (component) order, so edge buffers,
+    ///    captured outputs and tap `seq`s advance exactly as in serial mode.
+    ///
+    /// On failure, nodes before the first failing one (in batch order) are
+    /// committed and its error is returned. Later nodes in the batch did
+    /// evaluate (so any internal state they keep has advanced) but their
+    /// outputs are dropped. This is not the state a serial run leaves; see
+    /// [`Runtime::set_exec_mode`].
+    /// A panicking node propagates its panic, as in serial mode.
+    fn eval_batch(&mut self, ids: &[NodeId]) -> Result<(), RunError> {
+        if let [id] = ids {
+            return self.eval_node(id);
+        }
+
+        let inputs: Vec<Inputs> = ids.iter().map(|id| self.gather(id)).collect();
+
+        let results: Vec<Result<Outputs, NodeError>> = {
+            let mut by_id: HashMap<&NodeId, &mut Box<dyn Node>> = self
+                .nodes
+                .iter_mut()
+                .filter(|(id, _)| ids.contains(id))
+                .collect();
+            let work: Vec<(&mut Box<dyn Node>, &Inputs)> = ids
+                .iter()
+                .zip(&inputs)
+                .map(|(id, inputs)| (by_id.remove(id).expect("compiled node exists"), inputs))
+                .collect();
+
+            std::thread::scope(|scope| {
+                let mut work = work.into_iter();
+                let first = work.next();
+                let handles: Vec<_> = work
+                    .map(|(node, inputs)| scope.spawn(move || eval_detached(node, inputs)))
+                    .collect();
+                let mut results = Vec::with_capacity(ids.len());
+                if let Some((node, inputs)) = first {
+                    results.push(eval_detached(node, inputs));
+                }
+                for handle in handles {
+                    results.push(
+                        handle
+                            .join()
+                            .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+                    );
+                }
+                results
+            })
+        };
+
+        for (id, result) in ids.iter().zip(results) {
+            let outputs = result.map_err(|error| RunError {
+                node: id.clone(),
+                error,
+            })?;
+            self.commit(id, outputs);
+        }
         Ok(())
     }
 
@@ -757,6 +963,14 @@ impl Runtime {
             self.node_outputs.insert(id.clone(), captured);
         }
     }
+}
+
+/// Evaluate one node against already-gathered inputs, touching nothing else in
+/// the runtime — the unit of work a parallel batch hands to a thread.
+fn eval_detached(node: &mut Box<dyn Node>, inputs: &Inputs) -> Result<Outputs, NodeError> {
+    let mut outputs = Outputs::new();
+    node.eval(inputs, &mut outputs)?;
+    Ok(outputs)
 }
 
 /// Output ports whose value never leaves its own component.
@@ -909,6 +1123,41 @@ mod tests {
         // a dependency. The DAG shows neither feeds the other.
         assert!(!plan.successors(at("x")).contains(&at("y")));
         assert!(!plan.successors(at("y")).contains(&at("x")));
+    }
+
+    #[test]
+    fn diamond_branches_share_a_level() {
+        let plan = compile(&diamond());
+        let at = |id: &str| plan.component_of(&NodeId(id.to_string())).unwrap();
+        let mut branches = vec![at("x"), at("y")];
+        branches.sort_unstable();
+        assert_eq!(plan.levels(), vec![vec![at("s")], branches, vec![at("m")]]);
+    }
+
+    #[test]
+    fn level_is_the_longest_path_not_the_shortest() {
+        // a -> b -> c plus a shortcut a -> c: c must wait for b, so it sits at
+        // level 2 even though one of its inputs comes straight from level 0.
+        // An isolated node `z` (and a self-looping `k`) are sources: level 0.
+        let mut g = Graph::new();
+        for id in ["a", "b", "c", "k", "z"] {
+            g.add_node(spec(id, "k")).unwrap();
+        }
+        g.connect(port("a", "out"), port("b", "in")).unwrap();
+        g.connect(port("b", "out"), port("c", "in")).unwrap();
+        g.connect(port("a", "out"), port("c", "other")).unwrap();
+        g.connect(port("k", "out"), port("k", "in")).unwrap();
+
+        let plan = compile(&g);
+        let at = |id: &str| plan.component_of(&NodeId(id.to_string())).unwrap();
+        let mut sources = vec![at("a"), at("k"), at("z")];
+        sources.sort_unstable();
+        assert_eq!(plan.levels(), vec![sources, vec![at("b")], vec![at("c")]]);
+    }
+
+    #[test]
+    fn empty_graph_has_no_levels() {
+        assert!(compile(&Graph::new()).levels().is_empty());
     }
 
     #[test]
