@@ -71,6 +71,14 @@ pub enum NodeError {
     },
     /// A stage-specific failure (bad shape, mismatched inputs, etc.).
     Message(String),
+    /// A source has no more data (e.g. a video file reached its last frame).
+    ///
+    /// This is a *signal*, not a fault: it aborts the current pass like any
+    /// other error (so nothing downstream sees a stale or missing frame), and
+    /// [`crate::exec::Runtime::run_until_eos`] treats it as the normal way a
+    /// finite stream ends. Sources keep returning it on every later
+    /// evaluation until they are [`Node::reset`].
+    EndOfStream,
 }
 
 impl std::fmt::Display for NodeError {
@@ -83,6 +91,7 @@ impl std::fmt::Display for NodeError {
                 got,
             } => write!(f, "port '{port}' expected {expected:?} but got {got:?}"),
             NodeError::Message(m) => write!(f, "{m}"),
+            NodeError::EndOfStream => write!(f, "end of stream"),
         }
     }
 }

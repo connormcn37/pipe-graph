@@ -25,6 +25,10 @@ pub enum BuildError {
         value: String,
         expected: &'static str,
     },
+    /// The node is well-specified but cannot run in this environment (e.g. a
+    /// required external program such as `ffmpeg` is not installed, or an
+    /// input file does not exist).
+    Unavailable(String),
 }
 
 impl std::fmt::Display for BuildError {
@@ -37,6 +41,7 @@ impl std::fmt::Display for BuildError {
                 value,
                 expected,
             } => write!(f, "parameter '{key}' = '{value}' is not a valid {expected}"),
+            BuildError::Unavailable(m) => write!(f, "unavailable: {m}"),
         }
     }
 }
@@ -162,6 +167,7 @@ pub fn builtin_registry() -> Registry {
     reg.register("merge", |p| {
         Ok(Box::new(MergeStage::try_from(p)?) as Box<dyn Node>)
     });
+    crate::io::register_io(&mut reg);
 
     reg
 }
