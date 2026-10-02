@@ -39,6 +39,9 @@ Bevy); UI frontends adapt to it. The pieces:
 - **`graph`** — pure topology: `Graph` of `NodeSpec { id, kind, params }` and
   `Connection`s between named `(node, port)` endpoints. Cycles are allowed
   (feedback loops). Dependency-light; the editor mirrors these types.
+  `Graph::to_text`/`from_text` save and load a deterministic, line-oriented
+  text format (`node <id> <kind> k=v`, `edge a.out -> b.in`); try
+  `cargo run --example run_graph -- examples/graphs/split_merge.graph 1 --input src.in=4x4x3:200`.
 - **`traits::Processor`** — the original single-in/single-out `&mut Frame`
   transform (e.g. `ClearChannel`, `ProcessList`), still supported.
 - **`exec`** — the execution layer:
