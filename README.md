@@ -76,6 +76,9 @@ Bevy); UI frontends adapt to it. The pieces:
     publish it with `Outputs::set_shared` to keep that pointer identity stable
     through the scheduler.
 - **`stages`** — `CropStage`, `CastStage`, `SplitStage`, `MergeStage` as `Node`s.
+  - Per-pixel pack (`gain`, `grayscale`, `invert`, `threshold`, `box_blur`;
+    `u8` + `f32`) gives real workloads; `cargo run --release --example
+    bench_pipeline` times a 1080p split → 3×(blur → gain) → merge graph.
 - **`editor`** — Bevy-free controller logic: `EditorCommand`/`apply_command`
   (route user intents through the core `Graph`) and `view_diff` (which node
   views a frontend should spawn/despawn to mirror the graph).

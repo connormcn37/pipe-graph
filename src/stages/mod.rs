@@ -6,20 +6,37 @@
 //! - [`SplitStage`] — 1→k, split a k-channel frame into k single-channel frames.
 //! - [`MergeStage`] — k→1, interleave k single-channel frames into one.
 //!
+//! Per-pixel workloads (u8 and f32; semantics documented on each type):
+//! - [`GainStage`] — multiply by `factor` (u8 saturates).
+//! - [`GrayscaleStage`] — RGB(A) → 1-channel BT.601 luma (alpha dropped).
+//! - [`InvertStage`] — `255 - v` / `1.0 - v`.
+//! - [`ThresholdStage`] — binarize against a normalized `level`.
+//! - [`BoxBlurStage`] — per-channel box blur, edge-clamped, O(1) per pixel.
+//!
 //! Split/Merge declare a param-dependent number of ports (`out0..`, `in0..`),
 //! which is exactly why [`crate::exec::Node::ports`] takes `&self`.
 //!
 //! [`Frame`]: crate::data::Frame
 
+mod box_blur;
 mod cast;
 mod crop;
+mod gain;
+mod grayscale;
+mod invert;
 mod merge;
 mod split;
+mod threshold;
 
+pub use self::box_blur::BoxBlurStage;
 pub use self::cast::CastStage;
 pub use self::crop::CropStage;
+pub use self::gain::GainStage;
+pub use self::grayscale::GrayscaleStage;
+pub use self::invert::InvertStage;
 pub use self::merge::MergeStage;
 pub use self::split::SplitStage;
+pub use self::threshold::ThresholdStage;
 
 #[cfg(test)]
 mod tests {
