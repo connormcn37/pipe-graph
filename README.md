@@ -77,8 +77,12 @@ Bevy); UI frontends adapt to it. The pieces:
     through the scheduler.
 - **`stages`** — `CropStage`, `CastStage`, `SplitStage`, `MergeStage` as `Node`s.
 - **`editor`** — Bevy-free controller logic: `EditorCommand`/`apply_command`
-  (route user intents through the core `Graph`) and `view_diff` (which node
-  views a frontend should spawn/despawn to mirror the graph).
+  (route user intents — including `SetParam`/`RemoveParam` — through the core
+  `Graph`), `Layout` (canvas positions, auto-placed by longest-path depth;
+  `MoveNode` edits only the layout), `LiveSession` (graph + layout + a
+  `Runtime` re-instantiated on every topology/param edit, carrying inputs,
+  taps and watches across and reporting build/run errors in `last_error`),
+  and `view_diff` (which node views a frontend should spawn/despawn).
 - **`systems`** (Bevy-only, feature-gated) — a thin view/controller:
   `PipeGraphEditorPlugin` holds the `Graph` in a `GraphResource`, applies queued
   `EditorCommand`s, and syncs `NodeView` entities to match. The core never
