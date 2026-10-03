@@ -77,6 +77,12 @@ Bevy); UI frontends adapt to it. The pieces:
     `std::thread::scope` threads; inputs are gathered and outputs committed
     serially in component order, so a successful run's results and tap
     `seq`s match serial exactly. Hence `Node: Send` (and `Processor: Send`).
+  - **Fused runs.** `run_once` evaluates each fusable run as a unit: payloads
+    pass node to node and the private edge buffers between them stay empty.
+    A 1-in/1-out node can opt into `Node::eval_in_place` (`ProcessorNode`,
+    `CropStage`, identity `CastStage` do), transforming a uniquely owned
+    payload without a copy; shared payloads are cloned first. Outputs, taps and
+    errors match the serial path; `Runtime::set_fusion(false)` turns it off.
   - `Tap` — non-blocking latest-value previews on any output port, carrying a
     monotonic `seq`. `seq` counts *publishes*, so a still image broadcast into
     a stream still reads as live; `Arc::ptr_eq` on the payload answers the

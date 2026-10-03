@@ -205,6 +205,36 @@ pub trait Node: Send {
 
     /// Reset internal state (e.g. seed feedback buffers before a fresh run).
     fn reset(&mut self) {}
+
+    /// Opt-in in-place evaluation for 1-in/1-out nodes.
+    ///
+    /// `payload` is the value on the node's single input port. A node that
+    /// supports this transforms it *in place* into the value its single output
+    /// port would carry and returns `Some(result)`; the default returns `None`,
+    /// meaning "unsupported, call [`Node::eval`] instead".
+    ///
+    /// Why it exists: inside a fused run (see
+    /// [`crate::exec::Runtime::fusable_runs`]) the value handed from one node
+    /// to the next is usually *uniquely owned* — nothing else holds its `Arc`
+    /// — so the scheduler can give the node the buffer itself rather than a
+    /// copy. For a frame-sized payload that skips one full clone per stage.
+    /// When the value is shared, the scheduler clones it first, so a node never
+    /// needs to care where the payload came from.
+    ///
+    /// Contract:
+    /// - The scheduler only calls this on a node declaring exactly one input
+    ///   and one output port, whose input is fed by a single edge inside a
+    ///   fused run. Everything else goes through `eval`.
+    /// - Returning `None` must leave `payload` untouched: the scheduler then
+    ///   hands the same value to `eval`.
+    /// - `Some(Ok(()))` must leave `payload` equal to what `eval` would have
+    ///   published on the output port, so fused and unfused runs agree.
+    /// - `Some(Err(_))` reports the error `eval` would have; `payload` is then
+    ///   discarded, so its contents do not matter.
+    fn eval_in_place(&mut self, payload: &mut Payload) -> Option<Result<(), NodeError>> {
+        let _ = payload;
+        None
+    }
 }
 
 /// Adapts any single-in/single-out [`Processor`] into a [`Node`] with ports
@@ -233,6 +263,22 @@ impl<P: Processor> Node for ProcessorNode<P> {
         self.inner.process(&mut frame);
         outputs.set("out", Payload::Frame(frame));
         Ok(())
+    }
+
+    /// A `Processor` already works on `&mut Frame`, so in-place evaluation is
+    /// its natural form: no copy at all when the scheduler owns the frame.
+    fn eval_in_place(&mut self, payload: &mut Payload) -> Option<Result<(), NodeError>> {
+        Some(match payload {
+            Payload::Frame(frame) => {
+                self.inner.process(frame);
+                Ok(())
+            }
+            other => Err(NodeError::WrongPayload {
+                port: "in".to_string(),
+                expected: PayloadKind::Frame,
+                got: other.kind(),
+            }),
+        })
     }
 }
 
@@ -272,6 +318,43 @@ mod tests {
 
         assert_eq!(via_node, direct.to_rgb8());
         assert_eq!(via_node, vec![(0, 10, 20), (0, 40, 50)]);
+    }
+
+    #[test]
+    fn processor_node_in_place_matches_eval() {
+        let frame = Frame::from_rgb8(1, 2, vec![(255, 10, 20), (30, 40, 50)]);
+
+        let mut node = ProcessorNode::new(ClearChannel(Channel::Red));
+        let mut outputs = Outputs::new();
+        node.eval(
+            &inputs_with("in", Payload::Frame(frame.clone())),
+            &mut outputs,
+        )
+        .unwrap();
+        let via_eval = outputs.get("out").unwrap().as_frame().unwrap();
+
+        let mut payload = Payload::Frame(frame);
+        let before = payload.as_frame().unwrap().as_u8().unwrap().as_ptr();
+        assert_eq!(node.eval_in_place(&mut payload), Some(Ok(())));
+        let after = payload.as_frame().unwrap();
+
+        assert_eq!(after, via_eval);
+        // Same allocation: the frame was transformed, not copied.
+        assert_eq!(before, after.as_u8().unwrap().as_ptr());
+    }
+
+    #[test]
+    fn processor_node_in_place_rejects_wrong_kind() {
+        let mut node = ProcessorNode::new(ClearChannel(Channel::Red));
+        let mut payload = Payload::Scalar(1.0);
+        assert_eq!(
+            node.eval_in_place(&mut payload),
+            Some(Err(NodeError::WrongPayload {
+                port: "in".to_string(),
+                expected: PayloadKind::Frame,
+                got: PayloadKind::Scalar,
+            }))
+        );
     }
 
     #[test]
