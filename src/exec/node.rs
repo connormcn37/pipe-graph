@@ -189,10 +189,13 @@ impl Outputs {
 
 /// The unit of execution behind a graph node.
 ///
-/// Note: no `Send` bound yet — the initial scheduler is single-threaded. It can
-/// be added when parallel component execution lands, at which point the
-/// `Processor` stack it wraps would gain the same bound.
-pub trait Node {
+/// Nodes are `Send` because [`crate::exec::ExecMode::Parallel`] evaluates
+/// independent nodes on scoped worker threads: each node is still only ever
+/// touched by one thread at a time (the runtime hands out disjoint `&mut`
+/// borrows), so `Sync` is *not* required — interior state like a cached
+/// buffer or a counter needs no locking. The [`Processor`] stack that
+/// [`ProcessorNode`] wraps carries the same bound.
+pub trait Node: Send {
     /// Declare this node's input/output ports (may depend on `self`/params).
     fn ports(&self) -> PortSet;
 
