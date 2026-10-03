@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex};
 
 use pipe_graph::data::{Frame, FrameData, Payload, PayloadKind};
 use pipe_graph::exec::{
-    Inputs, Node, NodeError, Outputs, PortSet, PortSpec, Registry, Runtime, builtin_registry,
+    ExecMode, Inputs, Node, NodeError, Outputs, PortSet, PortSpec, Registry, Runtime,
+    builtin_registry,
 };
 use pipe_graph::graph::{Graph, NodeId, NodeSpec, Params, PortId};
 
@@ -545,4 +546,66 @@ fn fused_f32_chain_agrees_across_ticks() {
     }
     assert_eq!(outs[0], outs[1]);
     assert_eq!(outs[0].as_u8().unwrap(), &[200]);
+}
+
+#[test]
+fn parallel_mode_runs_each_fused_branch_in_place_on_its_own() {
+    // `src` fans out to two fused runs, a1 -> a2 and b1 -> b2. In parallel
+    // mode each run is one unit of work: its head copies the (shared) fan-out
+    // value once and its tail reuses that buffer, exactly as in serial mode.
+    let mut g = Graph::new();
+    for n in ["src", "a1", "a2", "b1", "b2"] {
+        g.add_node(node(n, "probe", &[("name", n)])).unwrap();
+    }
+    g.connect(port("src", "out"), port("a1", "in")).unwrap();
+    g.connect(port("src", "out"), port("b1", "in")).unwrap();
+    g.connect(port("a1", "out"), port("a2", "in")).unwrap();
+    g.connect(port("b1", "out"), port("b2", "in")).unwrap();
+
+    let run = |mode: ExecMode, fusion: bool| {
+        let log = Log::default();
+        let mut rt = Runtime::instantiate(&g, &registry(&log)).unwrap();
+        rt.set_exec_mode(mode);
+        rt.set_fusion(fusion);
+        rt.set_input(
+            &id("src"),
+            "in",
+            Payload::Frame(Frame::from_rgb8(2, 1, vec![(1, 0, 0), (0, 0, 0)])),
+        );
+        rt.tick(2).unwrap();
+        let entries = log.lock().unwrap().clone();
+        (rt, entries)
+    };
+
+    let (par, log) = run(ExecMode::Parallel { threads: 2 }, true);
+    assert_eq!(par.fusable_runs().len(), 2);
+    let entry = |name: &str| -> Vec<(Via, usize)> {
+        log.iter()
+            .filter(|e| e.0 == name)
+            .map(|e| (e.1, e.2))
+            .collect()
+    };
+    for (head, tail) in [("a1", "a2"), ("b1", "b2")] {
+        let (h, t) = (entry(head), entry(tail));
+        assert_eq!(h.len(), 2, "{head} ran once per tick");
+        for (h, t) in h.iter().zip(&t) {
+            assert_eq!(h.0, Via::Eval, "{head} copies the shared fan-out value");
+            assert_eq!(t.0, Via::InPlace, "{tail} reuses it");
+            assert_eq!(h.1, t.1, "{head} -> {tail} is one buffer");
+        }
+        assert!(
+            par.edge_buffer(&port(head, "out"), &port(tail, "in"))
+                .unwrap()
+                .is_empty(),
+            "{head} -> {tail} never materializes"
+        );
+    }
+
+    let (serial, _) = run(ExecMode::Serial, false);
+    for n in ["a2", "b2"] {
+        assert_eq!(
+            par.output(&id(n), "out").unwrap().as_frame().unwrap(),
+            serial.output(&id(n), "out").unwrap().as_frame().unwrap()
+        );
+    }
 }

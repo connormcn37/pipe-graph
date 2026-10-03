@@ -77,6 +77,8 @@ Bevy); UI frontends adapt to it. The pieces:
     `std::thread::scope` threads; inputs are gathered and outputs committed
     serially in component order, so a successful run's results and tap
     `seq`s match serial exactly. Hence `Node: Send` (and `Processor: Send`).
+    Fusion still applies: each fused run is one unit of work on one thread, so
+    fused branches of a fan-out run concurrently.
   - **Fused runs.** `run_once` evaluates each fusable run as a unit: payloads
     pass node to node and the private edge buffers between them stay empty.
     A 1-in/1-out node can opt into `Node::eval_in_place` (`ProcessorNode`,
