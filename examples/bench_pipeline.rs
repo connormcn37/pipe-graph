@@ -8,10 +8,11 @@
 //!            └─ blur2 ─ gain2 ─┘
 //! ```
 //!
-//! and times `run_once` per frame for both a `u8` and an `f32` RGB input.
-//! The three branches are independent, so this is the shape that parallel
-//! component execution and chain fusion are meant to speed up; run it before
-//! and after those land to compare.
+//! and times `run_once` per frame for both a `u8` and an `f32` RGB input,
+//! under each combination of [`ExecMode`] (serial / parallel) and fusion
+//! (off / on). The three branches are independent, so this is the shape that
+//! parallel component execution is meant to speed up; each `blur -> gain` pair
+//! is also a fused run, which parallel mode schedules as one unit.
 //!
 //! Usage: `cargo run --release --example bench_pipeline [frames] [radius]`
 //! (defaults: 30 frames, radius 4).
@@ -19,7 +20,7 @@
 use std::time::{Duration, Instant};
 
 use pipe_graph::data::{Frame, FrameData, Payload};
-use pipe_graph::exec::{Runtime, builtin_registry};
+use pipe_graph::exec::{ExecMode, Runtime, builtin_registry};
 use pipe_graph::graph::{Graph, NodeId, NodeSpec, Params, PortId};
 
 const W: u32 = 1920;
@@ -107,7 +108,7 @@ fn bench(label: &str, rt: &mut Runtime, input: Frame, frames: u32) {
     let ms = |d: Duration| d.as_secs_f64() * 1e3;
     let mean = ms(total) / frames as f64;
     println!(
-        "{label:>4}: mean {mean:7.2} ms/frame  median {:7.2}  min {:7.2}  max {:7.2}  ({:.1} fps)",
+        "{label:>22}: mean {mean:7.2} ms/frame  median {:7.2}  min {:7.2}  max {:7.2}  ({:.1} fps)",
         ms(times[times.len() / 2]),
         ms(times[0]),
         ms(times[times.len() - 1]),
@@ -137,19 +138,22 @@ fn main() {
     let u8_buf = pattern_u8();
     let f32_buf: Vec<f32> = u8_buf.iter().map(|&v| v as f32 / 255.0).collect();
 
-    let mut rt = Runtime::instantiate(&graph, &reg).expect("graph should instantiate");
-    bench(
-        "u8",
-        &mut rt,
-        Frame::from_data(W, H, 3, FrameData::U8(u8_buf)),
-        frames,
-    );
-
-    let mut rt = Runtime::instantiate(&graph, &reg).expect("graph should instantiate");
-    bench(
-        "f32",
-        &mut rt,
-        Frame::from_data(W, H, 3, FrameData::F32(f32_buf)),
-        frames,
-    );
+    let configs = [
+        ("serial", ExecMode::Serial, false),
+        ("serial+fused", ExecMode::Serial, true),
+        ("parallel", ExecMode::parallel(), false),
+        ("parallel+fused", ExecMode::parallel(), true),
+    ];
+    let inputs = [
+        ("u8", Frame::from_data(W, H, 3, FrameData::U8(u8_buf))),
+        ("f32", Frame::from_data(W, H, 3, FrameData::F32(f32_buf))),
+    ];
+    for (dtype, input) in &inputs {
+        for (name, mode, fusion) in configs {
+            let mut rt = Runtime::instantiate(&graph, &reg).expect("graph should instantiate");
+            rt.set_exec_mode(mode);
+            rt.set_fusion(fusion);
+            bench(&format!("{dtype} {name}"), &mut rt, input.clone(), frames);
+        }
+    }
 }

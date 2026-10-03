@@ -49,6 +49,10 @@ pub enum ExecMode {
     /// see [`Runtime::set_exec_mode`].) Worth it when sibling branches are individually
     /// expensive (per-frame filters on a fan-out), not for cheap nodes, where
     /// spawning threads costs more than it saves.
+    ///
+    /// Composes with fusion ([`Runtime::set_fusion`]): a fused run is one unit
+    /// of work, evaluated start to finish on a single thread (in place where it
+    /// can), so two fused branches run concurrently with each other.
     Parallel { threads: usize },
 }
 
@@ -911,26 +915,34 @@ impl Runtime {
     /// components still start in ascending index order within the level.
     fn run_parallel(&mut self, threads: usize) -> Result<(), RunError> {
         let cap = threads.max(1);
-        let mut batch: Vec<NodeId> = Vec::with_capacity(cap);
+        let mut batch: Vec<Unit> = Vec::with_capacity(cap);
         for li in 0..self.levels.len() {
             for k in 0..self.levels[li].len() {
                 let ci = self.levels[li][k];
-                match &self.plan.components[ci] {
-                    Component::Acyclic(id) => {
-                        batch.push(id.clone());
-                        if batch.len() == cap {
-                            self.eval_batch(&batch)?;
-                            batch.clear();
+                // A fused run is one unit of work, scheduled at its head's
+                // level: its later members' only inputs come from inside the
+                // run, and everything downstream of its tail sits at a deeper
+                // level, so it is complete before anything reads it.
+                let unit = match (self.fusion, self.fused_role[ci]) {
+                    (true, FusedRole::Member) => continue,
+                    (true, FusedRole::Head(run)) => Unit::Run(run),
+                    _ => match &self.plan.components[ci] {
+                        Component::Acyclic(id) => Unit::Node(id.clone()),
+                        Component::Cyclic { nodes } => {
+                            let nodes = nodes.clone();
+                            if !batch.is_empty() {
+                                self.eval_batch(&batch)?;
+                                batch.clear();
+                            }
+                            self.run_cyclic(&nodes)?;
+                            continue;
                         }
-                    }
-                    Component::Cyclic { nodes } => {
-                        let nodes = nodes.clone();
-                        if !batch.is_empty() {
-                            self.eval_batch(&batch)?;
-                            batch.clear();
-                        }
-                        self.run_cyclic(&nodes)?;
-                    }
+                    },
+                };
+                batch.push(unit);
+                if batch.len() == cap {
+                    self.eval_batch(&batch)?;
+                    batch.clear();
                 }
             }
             // A level is a barrier: the next one may read anything this one
@@ -943,71 +955,117 @@ impl Runtime {
         Ok(())
     }
 
-    /// Evaluate mutually independent acyclic nodes concurrently.
+    /// The node ids a [`Unit`] evaluates, head first.
+    fn unit_ids(&self, unit: &Unit) -> Vec<NodeId> {
+        match unit {
+            Unit::Node(id) => vec![id.clone()],
+            Unit::Run(run) => self.fusable[*run]
+                .iter()
+                .map(|&ci| match &self.plan.components[ci] {
+                    Component::Acyclic(id) => id.clone(),
+                    Component::Cyclic { .. } => unreachable!("fusable runs are acyclic"),
+                })
+                .collect(),
+        }
+    }
+
+    /// Evaluate mutually independent units — single nodes or whole fused runs —
+    /// concurrently.
     ///
     /// Three phases, only the middle one threaded:
-    /// 1. **Gather** every node's inputs serially. Nothing in the batch feeds
-    ///    anything else in it, so these are exactly the inputs a serial run
-    ///    would see.
+    /// 1. **Gather** every unit's head inputs and its members' wiring serially.
+    ///    Nothing in the batch feeds anything else in it, so these are exactly
+    ///    the inputs a serial run would see.
     /// 2. **Eval** on `std::thread::scope` threads (the calling thread takes
-    ///    the first node). Each thread gets a disjoint `&mut` to one node and
-    ///    a shared `&Inputs`; nothing else in the runtime is touched, which is
-    ///    why `Node: Send` is all that is required.
+    ///    the first unit). Each thread gets disjoint `&mut`s to its unit's
+    ///    nodes and shared read-only inputs; nothing else in the runtime is
+    ///    touched, which is why `Node: Send` is all that is required. A fused
+    ///    run is evaluated start to finish on one thread, handing values member
+    ///    to member exactly as [`Runtime::run_fused`] does (in place where it
+    ///    can).
     /// 3. **Commit** serially in batch (component) order, so edge buffers,
-    ///    captured outputs and tap `seq`s advance exactly as in serial mode.
+    ///    captured outputs and tap `seq`s advance exactly as in serial mode. For
+    ///    a fused run that means: each inner member's private links cleared and
+    ///    its observed outputs published, then the tail committed.
     ///
-    /// On failure, nodes before the first failing one (in batch order) are
-    /// committed and its error is returned. Later nodes in the batch did
-    /// evaluate (so any internal state they keep has advanced) but their
+    /// On failure, units before the first failing one (in batch order) are
+    /// committed, as are the members of the failing run that finished before
+    /// the failing node, and its error is returned. Later units in the batch
+    /// did evaluate (so any internal state they keep has advanced) but their
     /// outputs are dropped. This is not the state a serial run leaves; see
     /// [`Runtime::set_exec_mode`].
     /// A panicking node propagates its panic, as in serial mode.
-    fn eval_batch(&mut self, ids: &[NodeId]) -> Result<(), RunError> {
-        if let [id] = ids {
-            return self.eval_node(id);
+    fn eval_batch(&mut self, units: &[Unit]) -> Result<(), RunError> {
+        if let [unit] = units {
+            return match unit {
+                Unit::Node(id) => self.eval_node(id),
+                Unit::Run(run) => self.run_fused(*run),
+            };
         }
 
-        let inputs: Vec<Inputs> = ids.iter().map(|id| self.gather(id)).collect();
+        let chains: Vec<Vec<NodeId>> = units.iter().map(|u| self.unit_ids(u)).collect();
+        let head_inputs: Vec<Inputs> = chains.iter().map(|ids| self.gather(&ids[0])).collect();
+        let wirings: Vec<Vec<MemberWiring>> = chains
+            .iter()
+            .map(|ids| ids[1..].iter().map(|id| self.member_wiring(id)).collect())
+            .collect();
 
-        let results: Vec<Result<Outputs, NodeError>> = {
+        let outcomes: Vec<ChainOutcome> = {
             let mut by_id: HashMap<&NodeId, &mut Box<dyn Node>> = self
                 .nodes
                 .iter_mut()
-                .filter(|(id, _)| ids.contains(id))
+                .filter(|(id, _)| chains.iter().any(|ids| ids.contains(id)))
                 .collect();
-            let work: Vec<(&mut Box<dyn Node>, &Inputs)> = ids
+            let work: Vec<_> = chains
                 .iter()
-                .zip(&inputs)
-                .map(|(id, inputs)| (by_id.remove(id).expect("compiled node exists"), inputs))
+                .zip(&head_inputs)
+                .zip(&wirings)
+                .map(|((ids, inputs), wirings)| {
+                    let nodes: Vec<&mut Box<dyn Node>> = ids
+                        .iter()
+                        .map(|id| by_id.remove(id).expect("compiled node exists"))
+                        .collect();
+                    (nodes, inputs, wirings.as_slice())
+                })
                 .collect();
 
             std::thread::scope(|scope| {
                 let mut work = work.into_iter();
                 let first = work.next();
                 let handles: Vec<_> = work
-                    .map(|(node, inputs)| scope.spawn(move || eval_detached(node, inputs)))
+                    .map(|(nodes, inputs, wirings)| {
+                        scope.spawn(move || run_chain(nodes, inputs, wirings))
+                    })
                     .collect();
-                let mut results = Vec::with_capacity(ids.len());
-                if let Some((node, inputs)) = first {
-                    results.push(eval_detached(node, inputs));
+                let mut outcomes = Vec::with_capacity(units.len());
+                if let Some((nodes, inputs, wirings)) = first {
+                    outcomes.push(run_chain(nodes, inputs, wirings));
                 }
                 for handle in handles {
-                    results.push(
+                    outcomes.push(
                         handle
                             .join()
                             .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
                     );
                 }
-                results
+                outcomes
             })
         };
 
-        for (id, result) in ids.iter().zip(results) {
-            let outputs = result.map_err(|error| RunError {
-                node: id.clone(),
-                error,
-            })?;
-            self.commit(id, outputs);
+        for (ids, outcome) in chains.iter().zip(outcomes) {
+            for (id, kept) in ids.iter().zip(&outcome.kept) {
+                self.clear_outgoing(id);
+                self.publish(id, kept);
+            }
+            match outcome.tail {
+                Ok(outputs) => self.commit(ids.last().expect("non-empty unit"), outputs),
+                Err((k, error)) => {
+                    return Err(RunError {
+                        node: ids[k].clone(),
+                        error,
+                    });
+                }
+            }
         }
         Ok(())
     }
@@ -1106,13 +1164,19 @@ impl Runtime {
     /// not pinned in memory or mistaken for a current one.
     fn hand_off(&mut self, id: &NodeId, outputs: Outputs) -> HashMap<PortId, Arc<Payload>> {
         let arced = outputs.into_map();
+        self.clear_outgoing(id);
+        self.publish(id, &arced);
+        arced
+    }
+
+    /// Empty every edge buffer leaving `id`: its links inside a fused run,
+    /// which hold no value between runs.
+    fn clear_outgoing(&mut self, id: &NodeId) {
         if let Some(out_edges) = self.outgoing.get(id) {
             for &i in out_edges {
                 self.edges[i].buffer.clear();
             }
         }
-        self.publish(id, &arced);
-        arced
     }
 
     /// Evaluate a non-head member of a fused run, given the previous member's
@@ -1131,61 +1195,34 @@ impl Runtime {
         id: &NodeId,
         carried: HashMap<PortId, Arc<Payload>>,
     ) -> Result<Outputs, RunError> {
+        let wiring = self.member_wiring(id);
+        let node = self.nodes.get_mut(id).expect("compiled node exists");
+        eval_member(node, &wiring, carried).map_err(|error| RunError {
+            node: id.clone(),
+            error,
+        })
+    }
+
+    /// Everything a non-head member of a fused run reads besides its node and
+    /// the previous member's outputs, copied out of the runtime so it can be
+    /// evaluated without touching `self` — on this thread or a worker's.
+    fn member_wiring(&self, id: &NodeId) -> MemberWiring {
         let in_edges: &[usize] = self.incoming.get(id).map_or(&[], Vec::as_slice);
-
-        let mut shared: HashMap<PortId, Arc<Payload>> =
-            self.external.get(id).cloned().unwrap_or_default();
-        for &i in in_edges {
-            let edge = &self.edges[i];
-            if let Some(value) = carried.get(&edge.from.1) {
-                shared.insert(edge.to.1.clone(), value.clone());
-            }
-        }
-        // Release the previous member's handles so a value only this node now
-        // holds is recognised as uniquely owned below.
-        drop(carried);
-
+        let links = in_edges
+            .iter()
+            .map(|&i| (self.edges[i].from.1.clone(), self.edges[i].to.1.clone()))
+            .collect();
         let in_place = match (self.single_io.get(id), in_edges) {
             (Some((input, output)), &[only]) if self.edges[only].to.1 == *input => {
                 Some((input.clone(), output.clone()))
             }
             _ => None,
         };
-
-        let mut values: HashMap<PortId, Payload> = shared
-            .into_iter()
-            .map(|(port, value)| {
-                let owned = Arc::try_unwrap(value).unwrap_or_else(|v| v.as_ref().clone());
-                (port, owned)
-            })
-            .collect();
-
-        let fail = |error| RunError {
-            node: id.clone(),
-            error,
-        };
-        let node = self.nodes.get_mut(id).expect("compiled node exists");
-        if let Some((input, output)) = in_place
-            && let Some(mut payload) = values.remove(&input)
-        {
-            match node.eval_in_place(&mut payload) {
-                Some(Ok(())) => {
-                    let mut outputs = Outputs::new();
-                    outputs.set(&output.0, payload);
-                    return Ok(outputs);
-                }
-                Some(Err(error)) => return Err(fail(error)),
-                // Unsupported: fall through to `eval` with the value restored.
-                None => {
-                    values.insert(input, payload);
-                }
-            }
+        MemberWiring {
+            links,
+            external: self.external.get(id).cloned().unwrap_or_default(),
+            in_place,
         }
-
-        let mut outputs = Outputs::new();
-        node.eval(&Inputs::new(values), &mut outputs)
-            .map_err(fail)?;
-        Ok(outputs)
     }
 
     fn gather(&self, id: &NodeId) -> Inputs {
@@ -1264,6 +1301,138 @@ fn eval_detached(node: &mut Box<dyn Node>, inputs: &Inputs) -> Result<Outputs, N
     let mut outputs = Outputs::new();
     node.eval(inputs, &mut outputs)?;
     Ok(outputs)
+}
+
+/// How a non-head member of a fused run is fed. See [`Runtime::member_wiring`].
+struct MemberWiring {
+    /// `(previous member's output port, this member's input port)` for every
+    /// incoming edge. In a fusable run they all come from the previous member.
+    links: Vec<(PortId, PortId)>,
+    /// Values injected with [`Runtime::set_input`]; edges override them, as in
+    /// [`Runtime::gather`].
+    external: HashMap<PortId, Arc<Payload>>,
+    /// `(input, output)` when the member is 1-in/1-out and fed by exactly one
+    /// link into that input: the case [`Node::eval_in_place`] can serve.
+    in_place: Option<(PortId, PortId)>,
+}
+
+/// Evaluate a non-head member of a fused run on the previous member's outputs
+/// (`carried`), in place of its incoming edge buffers.
+///
+/// Inputs follow [`Runtime::gather`]'s precedence (external values first,
+/// edges override), but each payload is moved out of its `Arc` when this is
+/// the only reference rather than always cloned. For a 1-in/1-out node fed by a
+/// single link this lets [`Node::eval_in_place`] transform the previous
+/// member's buffer directly. A shared value — a producer that caches its output
+/// via [`Outputs::set_shared`], or one output fanned into two ports — is cloned
+/// first, exactly as `gather` would.
+fn eval_member(
+    node: &mut Box<dyn Node>,
+    wiring: &MemberWiring,
+    carried: HashMap<PortId, Arc<Payload>>,
+) -> Result<Outputs, NodeError> {
+    let mut shared = wiring.external.clone();
+    for (from, to) in &wiring.links {
+        if let Some(value) = carried.get(from) {
+            shared.insert(to.clone(), value.clone());
+        }
+    }
+    // Release the previous member's handles so a value only this node now holds
+    // is recognised as uniquely owned below.
+    drop(carried);
+
+    let mut values: HashMap<PortId, Payload> = shared
+        .into_iter()
+        .map(|(port, value)| {
+            let owned = Arc::try_unwrap(value).unwrap_or_else(|v| v.as_ref().clone());
+            (port, owned)
+        })
+        .collect();
+
+    if let Some((input, output)) = &wiring.in_place
+        && let Some(mut payload) = values.remove(input)
+    {
+        match node.eval_in_place(&mut payload) {
+            Some(Ok(())) => {
+                let mut outputs = Outputs::new();
+                outputs.set(&output.0, payload);
+                return Ok(outputs);
+            }
+            Some(Err(error)) => return Err(error),
+            // Unsupported: fall through to `eval` with the value restored.
+            None => {
+                values.insert(input.clone(), payload);
+            }
+        }
+    }
+
+    let mut outputs = Outputs::new();
+    node.eval(&Inputs::new(values), &mut outputs)?;
+    Ok(outputs)
+}
+
+/// A unit of work in a parallel level: one node, or a whole fused run.
+enum Unit {
+    Node(NodeId),
+    /// Index into [`Runtime::fusable_runs`].
+    Run(usize),
+}
+
+/// What a worker thread brings back from one [`Unit`].
+struct ChainOutcome {
+    /// For each non-tail member that finished, the outputs it did *not* hand
+    /// to the next member: the ones the main thread must still publish (taps,
+    /// captured ports). The handed-off link values are never kept, so they
+    /// stay uniquely owned for [`Node::eval_in_place`].
+    kept: Vec<HashMap<PortId, Arc<Payload>>>,
+    /// The tail's outputs, or the failing member's index and error.
+    tail: Result<Outputs, (usize, NodeError)>,
+}
+
+/// Evaluate a chain of nodes — a single node, or a fused run — touching nothing
+/// in the runtime: the parallel counterpart of [`Runtime::run_fused`].
+/// `nodes[0]` is the head (fed by `head_inputs`); `wirings[i]` feeds
+/// `nodes[i + 1]`.
+fn run_chain(
+    mut nodes: Vec<&mut Box<dyn Node>>,
+    head_inputs: &Inputs,
+    wirings: &[MemberWiring],
+) -> ChainOutcome {
+    let mut kept = Vec::with_capacity(wirings.len());
+    let mut outputs = match eval_detached(&mut *nodes[0], head_inputs) {
+        Ok(outputs) => outputs,
+        Err(error) => {
+            return ChainOutcome {
+                kept,
+                tail: Err((0, error)),
+            };
+        }
+    };
+    for (k, wiring) in wirings.iter().enumerate() {
+        let mut carried = outputs.into_map();
+        let mut keep: HashMap<PortId, Arc<Payload>> = HashMap::new();
+        carried.retain(|port, value| {
+            let linked = wiring.links.iter().any(|(from, _)| from == port);
+            if !linked {
+                keep.insert(port.clone(), value.clone());
+            }
+            linked
+        });
+        kept.push(keep);
+        outputs = match eval_member(&mut *nodes[k + 1], wiring, carried) {
+            Ok(outputs) => outputs,
+            Err(error) => {
+                return ChainOutcome {
+                    kept,
+                    tail: Err((k + 1, error)),
+                };
+            }
+        };
+    }
+    ChainOutcome {
+        kept,
+        tail: Ok(outputs),
+    }
 }
 
 /// Output ports whose value never leaves its own component.
