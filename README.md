@@ -112,6 +112,11 @@ Bevy); UI frontends adapt to it. The pieces:
   `PipeGraphEditorPlugin` holds the `Graph` in a `GraphResource`, applies queued
   `EditorCommand`s, and syncs `NodeView` entities to match. The core never
   depends on Bevy; ECS entities are views, not the data model.
+  `PipeGraphInteractPlugin` (headless) turns an abstract pointer into node
+  drags, selection and `Connect`/`RemoveNode`/`Disconnect` commands;
+  `PipeGraphRenderPlugin` draws boxes, pins (from `Registry::ports_of`) and
+  edges with gizmos and feeds it real mouse/keyboard input. Try it with
+  `cargo run --features bevy --example editor`.
 
 Realizing the vision above: an `Entity`'s `label` is a `NodeId`; its `inputs` /
 `connect` / `disconnect` are core `Graph` operations; a `Stage`'s `parameters`

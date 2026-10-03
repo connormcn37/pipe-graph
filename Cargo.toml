@@ -12,3 +12,9 @@ default = []
 
 # Enables Bevy ECS + systems (editor/runtime integration experiments).
 bevy = ["dep:bevy"]
+
+# Interactive node editor; needs a display:
+#   cargo run --features bevy --example editor
+[[example]]
+name = "editor"
+required-features = ["bevy"]
