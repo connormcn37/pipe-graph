@@ -108,14 +108,21 @@ Bevy); UI frontends adapt to it. The pieces:
   `Runtime` re-instantiated on every topology/param edit, carrying inputs,
   taps and watches across and reporting build/run errors in `last_error`),
   and `view_diff` (which node views a frontend should spawn/despawn).
-- **`systems`** (Bevy-only, feature-gated) — a thin view/controller:
-  `PipeGraphEditorPlugin` holds the `Graph` in a `GraphResource`, applies queued
-  `EditorCommand`s, and syncs `NodeView` entities to match. The core never
-  depends on Bevy; ECS entities are views, not the data model.
+- **`systems`** (Bevy-only, feature-gated) — a thin view/controller over a
+  live editing session: `PipeGraphEditorPlugin` holds a `LiveSession` (as the
+  non-send `EditorSession`), applies queued `EditorCommand`s through it, mirrors
+  its graph into a read-only `GraphResource`, and syncs `NodeView` entities to
+  match — placed from the session's `Layout`, and rebuilt when a param edit
+  changes a node's ports. While `EditorRun::playing` it runs the pipeline once
+  per frame (pausing at end of stream), keeps a preview tap on the selected
+  node, and summarizes errors in `EditorStatus`. The core never depends on
+  Bevy; ECS entities are views, not the data model.
   `PipeGraphInteractPlugin` (headless) turns an abstract pointer into node
-  drags, selection and `Connect`/`RemoveNode`/`Disconnect` commands;
-  `PipeGraphRenderPlugin` draws boxes, pins (from `Registry::ports_of`) and
-  edges with gizmos and feeds it real mouse/keyboard input. Try it with
+  drags (recorded with `MoveNode`), selection and
+  `Connect`/`RemoveNode`/`Disconnect` commands; `PipeGraphRenderPlugin` draws
+  boxes, pins (from `Registry::ports_of`) and edges with gizmos, the status
+  line and the selected node's live preview, and feeds it real mouse/keyboard
+  input (Space plays/pauses). Try it with
   `cargo run --features bevy --example editor`.
 
 Realizing the vision above: an `Entity`'s `label` is a `NodeId`; its `inputs` /
