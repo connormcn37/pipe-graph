@@ -662,6 +662,21 @@ impl Runtime {
         tap
     }
 
+    /// Like [`Runtime::add_tap`], but publishes into an existing [`Tap`].
+    ///
+    /// A rebuilt runtime (the editor re-instantiating after a parameter or
+    /// topology change) uses this so preview handles a UI already holds keep
+    /// receiving values instead of going silent.
+    pub fn attach_tap(&mut self, node: &NodeId, port: &str, tap: Tap) {
+        self.taps
+            .entry(node.clone())
+            .or_default()
+            .entry(PortId(port.to_string()))
+            .or_default()
+            .push(tap);
+        self.recompute_fusable();
+    }
+
     /// Detach every tap on `port`, and drop the value captured for it if
     /// nothing else is observing that port.
     ///

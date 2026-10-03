@@ -1,12 +1,22 @@
 //! Editor controller logic — Bevy-free and unit-testable.
 //!
 //! This layer sits between the authoritative [`crate::graph::Graph`] and any UI
-//! frontend (the Bevy layer in [`crate::systems`], or a test). It expresses two
-//! things the plan calls for, without depending on any UI toolkit:
+//! frontend (the Bevy layer in [`crate::systems`], or a test). It expresses the
+//! things an editor needs, without depending on any UI toolkit:
 //!
 //! - **Commands** ([`EditorCommand`] / [`apply_command`]): user intents that
 //!   mutate the graph, routed through the core `Graph` API so the graph stays
 //!   the single source of truth.
+//! - **Layout** ([`Layout`]): where each node sits on the canvas. Positions are
+//!   editor state, not pipeline state, so they live beside the graph rather
+//!   than in [`crate::graph::NodeSpec`] — moving a node must never force the
+//!   pipeline to rebuild. [`apply_command_with_layout`] routes
+//!   [`EditorCommand::MoveNode`] there and keeps the layout in step with
+//!   node additions/removals.
+//! - **Live session** ([`LiveSession`]): a graph + layout + running
+//!   [`crate::exec::Runtime`] kept in sync. Every topology or parameter edit
+//!   re-instantiates the runtime, carrying external inputs, taps and watches
+//!   across, and reports build/validation/run errors instead of panicking.
 //! - **View sync** ([`view_diff`]): given the graph and the set of node views a
 //!   frontend currently shows, compute which views to spawn and which to
 //!   despawn so the view mirrors the graph.
@@ -19,7 +29,14 @@ use std::collections::HashSet;
 
 use crate::graph::{EdgeId, Graph, GraphError, NodeId, NodeSpec, PortId};
 
-/// A user/editor intent to mutate the authoritative graph.
+mod layout;
+pub use self::layout::*;
+
+mod session;
+pub use self::session::*;
+
+/// A user/editor intent to mutate the authoritative graph (or, for
+/// [`EditorCommand::MoveNode`], the editor's [`Layout`]).
 #[derive(Debug, Clone)]
 pub enum EditorCommand {
     AddNode(NodeSpec),
@@ -29,6 +46,25 @@ pub enum EditorCommand {
     },
     RemoveNode(NodeId),
     Disconnect(EdgeId),
+    /// Set (insert or overwrite) one parameter on a node. The value is not
+    /// checked here; an invalid value surfaces when the graph is instantiated
+    /// (see [`LiveSession::last_error`]).
+    SetParam {
+        node: NodeId,
+        key: String,
+        value: String,
+    },
+    /// Remove one parameter from a node.
+    RemoveParam {
+        node: NodeId,
+        key: String,
+    },
+    /// Move a node on the canvas. Layout-only: it never touches the graph, so
+    /// it never triggers a pipeline rebuild.
+    MoveNode {
+        node: NodeId,
+        to: (f32, f32),
+    },
 }
 
 /// The result of applying an [`EditorCommand`], so a UI can report success or
@@ -39,13 +75,61 @@ pub enum CommandOutcome {
     Connected(EdgeId),
     NodeRemoved(NodeId),
     Disconnected(EdgeId),
+    /// A parameter was set; `previous` is the value it replaced, if any.
+    ParamSet {
+        node: NodeId,
+        key: String,
+        previous: Option<String>,
+    },
+    /// A parameter was removed; `previous` is the value it had.
+    ParamRemoved {
+        node: NodeId,
+        key: String,
+        previous: String,
+    },
+    /// A node was moved in the [`Layout`]; `previous` is its old position
+    /// (`None` if it had not been placed yet).
+    NodeMoved {
+        node: NodeId,
+        previous: Option<(f32, f32)>,
+    },
+    /// The command is valid but only concerns editor state outside the graph
+    /// (a [`EditorCommand::MoveNode`] given to plain [`apply_command`], which
+    /// has no layout to move). The graph is unchanged; use
+    /// [`apply_command_with_layout`] or [`LiveSession::apply`] to apply it.
+    NoGraphChange,
     /// The graph rejected the change (e.g. duplicate id, missing endpoint).
     Rejected(GraphError),
-    /// The target node/edge did not exist.
+    /// The target node/edge/parameter did not exist.
     NotFound,
 }
 
+impl CommandOutcome {
+    /// Whether this outcome changed the graph's topology or parameters, i.e.
+    /// whether a running pipeline built from the graph is now out of date.
+    ///
+    /// Note a [`CommandOutcome::ParamSet`] that wrote the same value back is
+    /// still reported as a change here (the outcome does not carry the new
+    /// value); [`LiveSession::apply`] filters that case out itself.
+    pub fn changes_graph(&self) -> bool {
+        matches!(
+            self,
+            CommandOutcome::NodeAdded(_)
+                | CommandOutcome::Connected(_)
+                | CommandOutcome::NodeRemoved(_)
+                | CommandOutcome::Disconnected(_)
+                | CommandOutcome::ParamSet { .. }
+                | CommandOutcome::ParamRemoved { .. }
+        )
+    }
+}
+
 /// Apply one command to the authoritative graph via the core `Graph` API.
+///
+/// [`EditorCommand::MoveNode`] has no graph effect: it yields
+/// [`CommandOutcome::NoGraphChange`] for an existing node (or
+/// [`CommandOutcome::NotFound`]) and leaves the graph untouched. Callers that
+/// keep a [`Layout`] should use [`apply_command_with_layout`] instead.
 pub fn apply_command(graph: &mut Graph, command: EditorCommand) -> CommandOutcome {
     match command {
         EditorCommand::AddNode(spec) => {
@@ -73,7 +157,65 @@ pub fn apply_command(graph: &mut Graph, command: EditorCommand) -> CommandOutcom
                 CommandOutcome::NotFound
             }
         }
+        EditorCommand::SetParam { node, key, value } => {
+            match graph.set_param(&node, key.clone(), value) {
+                Ok(previous) => CommandOutcome::ParamSet {
+                    node,
+                    key,
+                    previous,
+                },
+                Err(_) => CommandOutcome::NotFound,
+            }
+        }
+        EditorCommand::RemoveParam { node, key } => match graph.remove_param(&node, &key) {
+            Ok(Some(previous)) => CommandOutcome::ParamRemoved {
+                node,
+                key,
+                previous,
+            },
+            Ok(None) | Err(_) => CommandOutcome::NotFound,
+        },
+        EditorCommand::MoveNode { node, .. } => {
+            if graph.nodes.contains_key(&node) {
+                CommandOutcome::NoGraphChange
+            } else {
+                CommandOutcome::NotFound
+            }
+        }
     }
+}
+
+/// Apply one command to a graph *and* its editor [`Layout`].
+///
+/// [`EditorCommand::MoveNode`] moves the node in `layout`; every other command
+/// goes through [`apply_command`], after which the layout follows the graph:
+/// an added node is auto-placed (see [`Layout::place_missing`]) and a removed
+/// node's position is dropped. Existing positions are never shuffled, so an
+/// edit does not rearrange nodes the user has arranged by hand.
+pub fn apply_command_with_layout(
+    graph: &mut Graph,
+    layout: &mut Layout,
+    command: EditorCommand,
+) -> CommandOutcome {
+    if let EditorCommand::MoveNode { node, to } = command {
+        if !graph.nodes.contains_key(&node) {
+            return CommandOutcome::NotFound;
+        }
+        let previous = layout.set_position(node.clone(), to);
+        return CommandOutcome::NodeMoved { node, previous };
+    }
+
+    let outcome = apply_command(graph, command);
+    match &outcome {
+        CommandOutcome::NodeAdded(_) => {
+            layout.place_missing(graph);
+        }
+        CommandOutcome::NodeRemoved(id) => {
+            layout.remove(id);
+        }
+        _ => {}
+    }
+    outcome
 }
 
 /// Which node views a frontend should spawn/despawn so its views mirror the
@@ -131,6 +273,10 @@ mod tests {
         (NodeId(node.to_string()), PortId(port.to_string()))
     }
 
+    fn id(s: &str) -> NodeId {
+        NodeId(s.to_string())
+    }
+
     #[test]
     fn add_node_command_mutates_graph() {
         let mut g = Graph::new();
@@ -181,6 +327,162 @@ mod tests {
             EditorCommand::RemoveNode(NodeId("ghost".to_string())),
         );
         assert_eq!(outcome, CommandOutcome::NotFound);
+    }
+
+    #[test]
+    fn set_param_reports_previous_and_mutates_graph() {
+        let mut g = Graph::new();
+        apply_command(&mut g, EditorCommand::AddNode(spec("a")));
+        let set = |value: &str| EditorCommand::SetParam {
+            node: id("a"),
+            key: "channel".to_string(),
+            value: value.to_string(),
+        };
+
+        assert_eq!(
+            apply_command(&mut g, set("red")),
+            CommandOutcome::ParamSet {
+                node: id("a"),
+                key: "channel".to_string(),
+                previous: None,
+            }
+        );
+        assert_eq!(
+            apply_command(&mut g, set("blue")),
+            CommandOutcome::ParamSet {
+                node: id("a"),
+                key: "channel".to_string(),
+                previous: Some("red".to_string()),
+            }
+        );
+        assert_eq!(g.nodes[&id("a")].params["channel"], "blue");
+    }
+
+    #[test]
+    fn set_param_on_missing_node_is_not_found() {
+        let mut g = Graph::new();
+        let outcome = apply_command(
+            &mut g,
+            EditorCommand::SetParam {
+                node: id("ghost"),
+                key: "k".to_string(),
+                value: "v".to_string(),
+            },
+        );
+        assert_eq!(outcome, CommandOutcome::NotFound);
+    }
+
+    #[test]
+    fn remove_param_round_trip() {
+        let mut g = Graph::new();
+        apply_command(&mut g, EditorCommand::AddNode(spec("a")));
+        g.set_param(&id("a"), "channel", "red").unwrap();
+        let remove = || EditorCommand::RemoveParam {
+            node: id("a"),
+            key: "channel".to_string(),
+        };
+
+        assert_eq!(
+            apply_command(&mut g, remove()),
+            CommandOutcome::ParamRemoved {
+                node: id("a"),
+                key: "channel".to_string(),
+                previous: "red".to_string(),
+            }
+        );
+        // Removing an absent key is NotFound, not a silent success.
+        assert_eq!(apply_command(&mut g, remove()), CommandOutcome::NotFound);
+    }
+
+    #[test]
+    fn move_node_via_plain_apply_command_leaves_graph_alone() {
+        let mut g = Graph::new();
+        apply_command(&mut g, EditorCommand::AddNode(spec("a")));
+        let before = format!("{:?}", g.nodes[&id("a")]);
+
+        let outcome = apply_command(
+            &mut g,
+            EditorCommand::MoveNode {
+                node: id("a"),
+                to: (1.0, 2.0),
+            },
+        );
+        assert_eq!(outcome, CommandOutcome::NoGraphChange);
+        assert!(!outcome.changes_graph());
+        assert_eq!(format!("{:?}", g.nodes[&id("a")]), before);
+
+        let outcome = apply_command(
+            &mut g,
+            EditorCommand::MoveNode {
+                node: id("ghost"),
+                to: (1.0, 2.0),
+            },
+        );
+        assert_eq!(outcome, CommandOutcome::NotFound);
+    }
+
+    #[test]
+    fn layout_routing_moves_places_and_forgets_nodes() {
+        let mut g = Graph::new();
+        let mut layout = Layout::new();
+
+        apply_command_with_layout(&mut g, &mut layout, EditorCommand::AddNode(spec("a")));
+        let placed = layout.position(&id("a")).expect("added node is placed");
+
+        let outcome = apply_command_with_layout(
+            &mut g,
+            &mut layout,
+            EditorCommand::MoveNode {
+                node: id("a"),
+                to: (40.0, 50.0),
+            },
+        );
+        assert_eq!(
+            outcome,
+            CommandOutcome::NodeMoved {
+                node: id("a"),
+                previous: Some(placed),
+            }
+        );
+        assert_eq!(layout.position(&id("a")), Some((40.0, 50.0)));
+
+        // Moving a node that does not exist does not invent a position.
+        let outcome = apply_command_with_layout(
+            &mut g,
+            &mut layout,
+            EditorCommand::MoveNode {
+                node: id("ghost"),
+                to: (0.0, 0.0),
+            },
+        );
+        assert_eq!(outcome, CommandOutcome::NotFound);
+        assert_eq!(layout.position(&id("ghost")), None);
+
+        apply_command_with_layout(&mut g, &mut layout, EditorCommand::RemoveNode(id("a")));
+        assert_eq!(layout.position(&id("a")), None);
+        assert!(layout.is_empty());
+    }
+
+    #[test]
+    fn changes_graph_classifies_outcomes() {
+        assert!(CommandOutcome::NodeAdded(id("a")).changes_graph());
+        assert!(
+            CommandOutcome::ParamRemoved {
+                node: id("a"),
+                key: "k".to_string(),
+                previous: "v".to_string(),
+            }
+            .changes_graph()
+        );
+        assert!(
+            !CommandOutcome::NodeMoved {
+                node: id("a"),
+                previous: None,
+            }
+            .changes_graph()
+        );
+        assert!(!CommandOutcome::NotFound.changes_graph());
+        assert!(!CommandOutcome::Rejected(GraphError::MissingNode("a".into())).changes_graph());
     }
 
     #[test]
