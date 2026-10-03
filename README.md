@@ -39,6 +39,9 @@ Bevy); UI frontends adapt to it. The pieces:
 - **`graph`** — pure topology: `Graph` of `NodeSpec { id, kind, params }` and
   `Connection`s between named `(node, port)` endpoints. Cycles are allowed
   (feedback loops). Dependency-light; the editor mirrors these types.
+  `Graph::to_text`/`from_text` save and load a deterministic, line-oriented
+  text format (`node <id> <kind> k=v`, `edge a.out -> b.in`); try
+  `cargo run --example run_graph -- examples/graphs/split_merge.graph 1 --input src.in=4x4x3:200`.
 - **`traits::Processor`** — the original single-in/single-out `&mut Frame`
   transform (e.g. `ClearChannel`, `ProcessList`), still supported.
 - **`exec`** — the execution layer:
@@ -76,6 +79,9 @@ Bevy); UI frontends adapt to it. The pieces:
     publish it with `Outputs::set_shared` to keep that pointer identity stable
     through the scheduler.
 - **`stages`** — `CropStage`, `CastStage`, `SplitStage`, `MergeStage` as `Node`s.
+  - Per-pixel pack (`gain`, `grayscale`, `invert`, `threshold`, `box_blur`;
+    `u8` + `f32`) gives real workloads; `cargo run --release --example
+    bench_pipeline` times a 1080p split → 3×(blur → gain) → merge graph.
 - **`io`** — video sources/sinks over one pure-Rust Y4M codec: `y4m_source` /
   `y4m_sink` for files, `ffmpeg_source` / `ffmpeg_sink` piping Y4M through an
   `ffmpeg` process (no new dependencies). Sources end with
