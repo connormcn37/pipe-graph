@@ -10,7 +10,10 @@ use std::collections::HashMap;
 use crate::exec::{Node, PortSet, ProcessorNode};
 use crate::graph::{NodeSpec, Params};
 use crate::processors::{Channel, ClearChannel};
-use crate::stages::{CastStage, CropStage, MergeStage, SplitStage};
+use crate::stages::{
+    BoxBlurStage, CastStage, CropStage, GainStage, GrayscaleStage, InvertStage, MergeStage,
+    SplitStage, ThresholdStage,
+};
 
 /// Errors raised while constructing a node from its spec.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +28,10 @@ pub enum BuildError {
         value: String,
         expected: &'static str,
     },
+    /// The node is well-specified but cannot run in this environment (e.g. a
+    /// required external program such as `ffmpeg` is not installed, or an
+    /// input file does not exist).
+    Unavailable(String),
 }
 
 impl std::fmt::Display for BuildError {
@@ -37,6 +44,7 @@ impl std::fmt::Display for BuildError {
                 value,
                 expected,
             } => write!(f, "parameter '{key}' = '{value}' is not a valid {expected}"),
+            BuildError::Unavailable(m) => write!(f, "unavailable: {m}"),
         }
     }
 }
@@ -162,6 +170,22 @@ pub fn builtin_registry() -> Registry {
     reg.register("merge", |p| {
         Ok(Box::new(MergeStage::try_from(p)?) as Box<dyn Node>)
     });
+    reg.register("gain", |p| {
+        Ok(Box::new(GainStage::try_from(p)?) as Box<dyn Node>)
+    });
+    reg.register("grayscale", |p| {
+        Ok(Box::new(GrayscaleStage::try_from(p)?) as Box<dyn Node>)
+    });
+    reg.register("invert", |p| {
+        Ok(Box::new(InvertStage::try_from(p)?) as Box<dyn Node>)
+    });
+    reg.register("threshold", |p| {
+        Ok(Box::new(ThresholdStage::try_from(p)?) as Box<dyn Node>)
+    });
+    reg.register("box_blur", |p| {
+        Ok(Box::new(BoxBlurStage::try_from(p)?) as Box<dyn Node>)
+    });
+    crate::io::register_io(&mut reg);
 
     reg
 }

@@ -5,6 +5,9 @@
 
 use std::collections::{HashMap, HashSet};
 
+mod text;
+pub use text::{ParseError, ParseErrorKind};
+
 /// Stable identifier for a node/stage in the graph.
 ///
 /// Early version uses a string label (matches README intent: unique label).
