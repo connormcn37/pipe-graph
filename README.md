@@ -82,6 +82,11 @@ Bevy); UI frontends adapt to it. The pieces:
   - Per-pixel pack (`gain`, `grayscale`, `invert`, `threshold`, `box_blur`;
     `u8` + `f32`) gives real workloads; `cargo run --release --example
     bench_pipeline` times a 1080p split → 3×(blur → gain) → merge graph.
+- **`io`** — video sources/sinks over one pure-Rust Y4M codec: `y4m_source` /
+  `y4m_sink` for files, `ffmpeg_source` / `ffmpeg_sink` piping Y4M through an
+  `ffmpeg` process (no new dependencies). Sources end with
+  `NodeError::EndOfStream`; drive them with `Runtime::run_until_eos`. Try
+  `cargo run --example transcode -- in.y4m out.mp4 --clear red`.
 - **`editor`** — Bevy-free controller logic: `EditorCommand`/`apply_command`
   (route user intents through the core `Graph`) and `view_diff` (which node
   views a frontend should spawn/despawn to mirror the graph).

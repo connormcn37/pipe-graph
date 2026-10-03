@@ -191,6 +191,16 @@ impl std::fmt::Display for RunError {
 
 impl std::error::Error for RunError {}
 
+impl RunError {
+    /// Whether this "error" is a source reporting [`NodeError::EndOfStream`]
+    /// rather than a real failure.
+    ///
+    /// [`NodeError::EndOfStream`]: crate::exec::NodeError::EndOfStream
+    pub fn is_end_of_stream(&self) -> bool {
+        matches!(self.error, crate::exec::NodeError::EndOfStream)
+    }
+}
+
 /// Compile the topology of `graph` into an ordered [`Plan`].
 ///
 /// This is pure topology — it needs no registry and does not validate ports.
@@ -660,6 +670,34 @@ impl Runtime {
             self.run_once()?;
         }
         Ok(())
+    }
+
+    /// Run passes until a source reports end of stream, or `max` passes have
+    /// completed. Returns the number of *complete* passes (for a pipeline fed
+    /// by one source, the number of frames that went all the way through).
+    ///
+    /// A pass that hits end of stream is abandoned at that node, exactly like
+    /// any other [`RunError`], and is not counted. Components ordered *before*
+    /// the exhausted source in that pass have already run, and their effects
+    /// stand: with several independent sources, a branch that ran earlier in
+    /// the final pass may have consumed (and, through a sink, written) one
+    /// more frame than the branch whose source ran dry. Nothing is rolled
+    /// back, because effects like a sink's write cannot be. A graph with a
+    /// single source is unaffected — everything that depends on the source is
+    /// ordered after it, so no partial frame escapes.
+    ///
+    /// Sinks are *not* finalized here: an encoder flushes when its node is
+    /// dropped (drop the `Runtime`) or [`Runtime::reset`].
+    pub fn run_until_eos(&mut self, max: u64) -> Result<u64, RunError> {
+        let mut passes = 0;
+        while passes < max {
+            match self.run_once() {
+                Ok(()) => passes += 1,
+                Err(e) if e.is_end_of_stream() => return Ok(passes),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(passes)
     }
 
     fn eval_node(&mut self, id: &NodeId) -> Result<(), RunError> {
