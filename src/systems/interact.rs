@@ -13,7 +13,8 @@
 //!   → queue [`EditorCommand::Connect`] (always oriented output → input; an
 //!   input that is already fed has its old edge `Disconnect`ed first);
 //! - press on a node body → select it, raise it to the front and drag it
-//!   (moves its `Transform`);
+//!   (moves its `Transform`); releasing queues [`EditorCommand::MoveNode`] so
+//!   the session's layout records where it was dropped;
 //! - press near an edge line → select the edge;
 //! - press on empty space → clear the selection;
 //! - Delete/Backspace → queue [`EditorCommand::RemoveNode`] or
@@ -28,6 +29,7 @@ use bevy::prelude::*;
 
 use super::layout::{
     EDGE_HIT_DISTANCE, PinSide, distance_to_segment, pin_at, point_in_rect, port_anchor,
+    world_to_canvas,
 };
 use super::{
     EditorCommands, EditorCoreSystems, GraphResource, NodeShape, NodeView, PipeGraphEditorPlugin,
@@ -295,21 +297,36 @@ pub fn handle_pointer(
     }
 
     if pointer.just_released {
-        if let DragState::Wire {
-            node, side, port, ..
-        } = std::mem::take(&mut drag.0)
-            && let Some(c) = cursor
-        {
-            let nodes = collect_nodes(views.iter());
-            if let Some(NodePick::Pin(t_node, t_side, t_port)) = pick_node(&nodes, c)
-                && t_side == side.opposite()
-            {
-                let (from, to) = match side {
-                    PinSide::Output => ((node, port), (t_node, t_port)),
-                    PinSide::Input => ((t_node, t_port), (node, port)),
-                };
-                queue_connect(&graph.0, &mut queue.queue, from, to);
+        match std::mem::take(&mut drag.0) {
+            DragState::Wire {
+                node, side, port, ..
+            } => {
+                if let Some(c) = cursor {
+                    let nodes = collect_nodes(views.iter());
+                    if let Some(NodePick::Pin(t_node, t_side, t_port)) = pick_node(&nodes, c)
+                        && t_side == side.opposite()
+                    {
+                        let (from, to) = match side {
+                            PinSide::Output => ((node, port), (t_node, t_port)),
+                            PinSide::Input => ((t_node, t_port), (node, port)),
+                        };
+                        queue_connect(&graph.0, &mut queue.queue, from, to);
+                    }
+                }
             }
+            // Record where the node was dropped in the session's layout, so
+            // the position survives the view being rebuilt (e.g. by a param
+            // edit that changes its ports) and belongs to the editing session
+            // rather than to one ECS entity.
+            DragState::MoveNode { entity, .. } => {
+                if let Ok((_, view, _, tf)) = views.get(entity) {
+                    queue.queue.push(EditorCommand::MoveNode {
+                        node: view.id.clone(),
+                        to: world_to_canvas(tf.translation.truncate()),
+                    });
+                }
+            }
+            DragState::Idle => {}
         }
         drag.0 = DragState::Idle;
     }

@@ -5,18 +5,27 @@
 //! ```
 //!
 //! Opens a window showing a small sample graph (split → 3 × clear_channel →
-//! merge). Drag a node's body to move it; drag from an output pin (right side)
-//! to an input pin (left side) to connect; click a node or an edge and press
-//! Delete/Backspace to remove it.
+//! merge) running live on a generated test pattern:
+//!
+//! - click a node to select it and see its latest output frame under it;
+//! - Space pauses/resumes the pipeline (the status line, top left, shows the
+//!   frame count and any build or run error);
+//! - drag a node's body to move it; drag from an output pin (right side) to an
+//!   input pin (left side) to connect; click a node or an edge and press
+//!   Delete/Backspace to remove it. Every edit rebuilds the pipeline, and
+//!   previews keep updating across the rebuild.
 //!
 //! The sample graph is built by queueing ordinary `EditorCommand`s — the same
-//! path the UI uses — so the example also exercises the command pipeline. It is
-//! a topology demo only; nothing is executed.
+//! path the UI uses — so the example also exercises the command pipeline.
 
 use bevy::prelude::*;
+use pipe_graph::data::{Frame, Payload};
 use pipe_graph::editor::EditorCommand;
 use pipe_graph::graph::{NodeId, NodeSpec, Params, PortId};
-use pipe_graph::systems::{EditorCommands, PipeGraphEditorPlugin, PipeGraphRenderPlugin};
+use pipe_graph::systems::{
+    EditorCommands, EditorRun, EditorSelection, EditorSession, PipeGraphEditorPlugin,
+    PipeGraphRenderPlugin, Selection,
+};
 
 fn main() {
     App::new()
@@ -28,13 +37,48 @@ fn main() {
             ..default()
         }))
         .add_plugins((PipeGraphEditorPlugin, PipeGraphRenderPlugin))
-        .add_systems(Startup, (spawn_camera, queue_sample_graph))
+        .insert_resource(EditorRun {
+            playing: true,
+            ..default()
+        })
+        // Start with the result selected, so its preview is on screen at once.
+        .insert_resource(EditorSelection(Some(Selection::Node(NodeId(
+            "merge".to_string(),
+        )))))
+        .add_systems(
+            Startup,
+            (spawn_camera, queue_sample_graph, feed_test_pattern),
+        )
         .run();
 }
 
 fn spawn_camera(mut commands: Commands) {
-    // Center the view on the auto-layout's three columns (x = 0, 260, 520).
-    commands.spawn((Camera2d, Transform::from_xyz(260.0, 0.0, 0.0)));
+    // Center the view on the sample's auto-layout: three columns (x = 0, 220,
+    // 440) and three rows (y = 0, -120, -240), with room for previews below.
+    commands.spawn((Camera2d, Transform::from_xyz(220.0, -180.0, 0.0)));
+}
+
+/// A 160x90 RGB gradient with a checker, fed into the split. The session
+/// remembers it and re-injects it after every rebuild.
+fn feed_test_pattern(mut session: NonSendMut<EditorSession>) {
+    let (w, h) = (160u32, 90u32);
+    let px = (0..h)
+        .flat_map(|y| {
+            (0..w).map(move |x| {
+                let checker = if (x / 16 + y / 16) % 2 == 0 { 60 } else { 0 };
+                (
+                    (x * 255 / w) as u8,
+                    (y * 255 / h) as u8,
+                    (255 - x * 255 / w) as u8 / 2 + checker,
+                )
+            })
+        })
+        .collect();
+    session.0.set_input(
+        &NodeId("split".to_string()),
+        "in",
+        Payload::Frame(Frame::from_rgb8(w, h, px)),
+    );
 }
 
 fn spec(id: &str, kind: &str, params: &[(&str, &str)]) -> NodeSpec {

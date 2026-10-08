@@ -179,19 +179,41 @@ impl LiveSession {
     /// for compound edits (paste, undo of a group) so the pipeline is not
     /// re-instantiated — and validated against half-finished states — after
     /// each step.
+    ///
+    /// Nodes added by the batch are auto-placed once the whole batch is in,
+    /// not as each is added: a batch typically adds nodes and *then* connects
+    /// them, and placing at add time would put every one of them in the first
+    /// column. Nodes that existed before the batch never move, and a node the
+    /// batch itself moves with [`EditorCommand::MoveNode`] keeps that spot.
     pub fn apply_all(
         &mut self,
         commands: impl IntoIterator<Item = EditorCommand>,
     ) -> Vec<CommandOutcome> {
         let mut changed = false;
+        let mut added: HashSet<NodeId> = HashSet::new();
         let outcomes = commands
             .into_iter()
             .map(|command| {
                 let (outcome, c) = self.apply_without_rebuild(command);
                 changed |= c;
+                match &outcome {
+                    CommandOutcome::NodeAdded(id) => {
+                        added.insert(id.clone());
+                    }
+                    CommandOutcome::NodeMoved { node, .. } | CommandOutcome::NodeRemoved(node) => {
+                        added.remove(node);
+                    }
+                    _ => {}
+                }
                 outcome
             })
             .collect();
+        if !added.is_empty() {
+            for id in &added {
+                self.layout.remove(id);
+            }
+            self.layout.place_missing(&self.graph);
+        }
         if changed {
             self.rebuild();
         }
@@ -424,6 +446,44 @@ mod tests {
             key: "channel".to_string(),
             value: ch.to_string(),
         }
+    }
+
+    #[test]
+    fn a_batch_places_its_new_nodes_after_wiring_them() {
+        let link = |a: &str, b: &str| EditorCommand::Connect {
+            from: (id(a), PortId("out".to_string())),
+            to: (id(b), PortId("in".to_string())),
+        };
+        let clear =
+            |n: &str| EditorCommand::AddNode(node(n, "clear_channel", &[("channel", "red")]));
+
+        let mut s = LiveSession::new(builtin_registry());
+        s.apply_all([
+            clear("a"),
+            clear("b"),
+            clear("c"),
+            link("a", "b"),
+            link("b", "c"),
+        ]);
+        let x = |s: &LiveSession, n: &str| s.layout().position(&id(n)).unwrap().0;
+        // Placed by their final columns, not all in column 0.
+        assert!(x(&s, "a") < x(&s, "b") && x(&s, "b") < x(&s, "c"));
+        assert_eq!(*s.layout(), Layout::auto(s.graph()));
+
+        // A later batch leaves earlier nodes alone and honours its own moves.
+        let before = s.layout().position(&id("a"));
+        s.apply_all([
+            clear("d"),
+            clear("e"),
+            link("c", "d"),
+            EditorCommand::MoveNode {
+                node: id("e"),
+                to: (-500.0, 0.0),
+            },
+        ]);
+        assert_eq!(s.layout().position(&id("a")), before);
+        assert!(x(&s, "d") > x(&s, "c"));
+        assert_eq!(s.layout().position(&id("e")), Some((-500.0, 0.0)));
     }
 
     #[test]

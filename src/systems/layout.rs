@@ -1,8 +1,8 @@
-//! Pure editor geometry: node box sizing, pin placement, hit testing and an
-//! initial auto-layout.
+//! Pure editor geometry: node box sizing, pin placement, hit testing, and the
+//! mapping between the session's canvas layout and world space.
 //!
 //! Nothing here touches the ECS — every function takes plain values (`Vec2`,
-//! [`PortSet`], [`Graph`]) and returns plain values — so the fiddly geometry is
+//! [`PortSet`]) and returns plain values — so the fiddly geometry is
 //! covered by ordinary unit tests, and both the renderer ([`super::render`])
 //! and the input handler ([`super::interact`]) agree on where a pin *is* by
 //! construction: they call the same functions. It only uses `bevy::math` for
@@ -11,12 +11,10 @@
 //! Coordinate convention: world space, +Y up (Bevy's 2D convention). A node's
 //! position is the *center* of its box (its `Transform` translation).
 
-use std::collections::HashMap;
-
 use bevy::math::Vec2;
 
 use crate::exec::PortSet;
-use crate::graph::{Graph, NodeId, PortId};
+use crate::graph::PortId;
 
 /// Width of every node box. Fixed so labels line up and pins sit on a
 /// predictable edge; height grows with the port count instead.
@@ -32,9 +30,6 @@ pub const PIN_RADIUS: f32 = 5.0;
 pub const PIN_HIT_RADIUS: f32 = 10.0;
 /// How close (in world units) a click must be to an edge line to select it.
 pub const EDGE_HIT_DISTANCE: f32 = 6.0;
-/// Horizontal / vertical spacing used by [`auto_layout`].
-pub const LAYOUT_COLUMN_SPACING: f32 = 260.0;
-pub const LAYOUT_ROW_SPACING: f32 = 140.0;
 
 /// Which side of a node box a pin is on. Inputs are on the left, outputs on
 /// the right, so data visually flows left-to-right.
@@ -142,60 +137,19 @@ pub fn distance_to_segment(p: Vec2, a: Vec2, b: Vec2) -> f32 {
     p.distance(a + ab * t)
 }
 
-/// An initial, readable position for every node: columns by longest-path depth
-/// from the sources (so data flows left-to-right) and rows by id within a
-/// column (so the result is deterministic despite `HashMap` ordering).
+/// Map a position in the session's canvas [`Layout`](crate::editor::Layout)
+/// (+Y *down*, rows grow downward like a page) to world space (+Y up).
 ///
-/// Cycles are legal in the graph (feedback loops), so depth relaxation is
-/// capped at `n - 1`; a cycle simply stops pushing its members rightward
-/// instead of looping forever. Self-loops are ignored. The layout is only a
-/// starting point — positions are owned by node `Transform`s once spawned.
-pub fn auto_layout(graph: &Graph) -> HashMap<NodeId, Vec2> {
-    let n = graph.nodes.len();
-    let mut depth: HashMap<&NodeId, usize> = graph.nodes.keys().map(|id| (id, 0)).collect();
-    let max_depth = n.saturating_sub(1);
+/// The layout is the editor-independent record of where nodes sit; this is
+/// the one place the two conventions meet, so the auto-placed grid reads
+/// top-to-bottom on screen exactly as it does on the canvas.
+pub fn canvas_to_world((x, y): (f32, f32)) -> Vec2 {
+    Vec2::new(x, -y)
+}
 
-    // Bellman-Ford-style relaxation; at most `n` passes are ever needed.
-    for _ in 0..n {
-        let mut changed = false;
-        for conn in graph.edges.values() {
-            let (from, to) = (&conn.from.0, &conn.to.0);
-            if from == to {
-                continue;
-            }
-            let (Some(&df), Some(&dt)) = (depth.get(from), depth.get(to)) else {
-                continue;
-            };
-            let candidate = (df + 1).min(max_depth);
-            if candidate > dt {
-                depth.insert(to, candidate);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-
-    let mut columns: HashMap<usize, Vec<&NodeId>> = HashMap::new();
-    for (id, d) in &depth {
-        columns.entry(*d).or_default().push(id);
-    }
-
-    let mut out = HashMap::with_capacity(n);
-    for (col, mut ids) in columns {
-        ids.sort_by(|a, b| a.0.cmp(&b.0));
-        // Center each column vertically around y = 0.
-        let top = (ids.len() as f32 - 1.0) * LAYOUT_ROW_SPACING / 2.0;
-        for (row, id) in ids.into_iter().enumerate() {
-            let pos = Vec2::new(
-                col as f32 * LAYOUT_COLUMN_SPACING,
-                top - row as f32 * LAYOUT_ROW_SPACING,
-            );
-            out.insert(id.clone(), pos);
-        }
-    }
-    out
+/// Inverse of [`canvas_to_world`].
+pub fn world_to_canvas(world: Vec2) -> (f32, f32) {
+    (world.x, -world.y)
 }
 
 #[cfg(test)]
@@ -203,7 +157,6 @@ mod tests {
     use super::*;
     use crate::data::PayloadKind;
     use crate::exec::PortSpec;
-    use crate::graph::{NodeSpec, Params};
 
     fn ports(inputs: &[&str], outputs: &[&str]) -> PortSet {
         PortSet::new(
@@ -216,23 +169,6 @@ mod tests {
                 .map(|p| PortSpec::new(*p, PayloadKind::Frame))
                 .collect(),
         )
-    }
-
-    fn add(g: &mut Graph, id: &str) {
-        g.add_node(NodeSpec {
-            id: NodeId(id.to_string()),
-            kind: "x".to_string(),
-            params: Params::new(),
-        })
-        .unwrap();
-    }
-
-    fn link(g: &mut Graph, a: &str, b: &str) {
-        g.connect(
-            (NodeId(a.to_string()), PortId("out".to_string())),
-            (NodeId(b.to_string()), PortId("in".to_string())),
-        )
-        .unwrap();
     }
 
     #[test]
@@ -331,39 +267,10 @@ mod tests {
     }
 
     #[test]
-    fn auto_layout_columns_follow_data_flow() {
-        let mut g = Graph::new();
-        for id in ["src", "a", "b", "sink"] {
-            add(&mut g, id);
-        }
-        link(&mut g, "src", "a");
-        link(&mut g, "src", "b");
-        link(&mut g, "a", "sink");
-        link(&mut g, "b", "sink");
-
-        let pos = auto_layout(&g);
-        let x = |id: &str| pos[&NodeId(id.to_string())].x;
-        let y = |id: &str| pos[&NodeId(id.to_string())].y;
-        assert_eq!(x("src"), 0.0);
-        assert_eq!(x("a"), LAYOUT_COLUMN_SPACING);
-        assert_eq!(x("b"), LAYOUT_COLUMN_SPACING);
-        assert_eq!(x("sink"), 2.0 * LAYOUT_COLUMN_SPACING);
-        // Same column: distinct rows, ordered by id, centered on 0.
-        assert!(y("a") > y("b"));
-        assert_eq!(y("a"), -y("b"));
-    }
-
-    #[test]
-    fn auto_layout_terminates_on_cycles() {
-        let mut g = Graph::new();
-        add(&mut g, "a");
-        add(&mut g, "b");
-        link(&mut g, "a", "b");
-        link(&mut g, "b", "a");
-        link(&mut g, "a", "a");
-        let pos = auto_layout(&g);
-        assert_eq!(pos.len(), 2);
-        // Depth is capped at n - 1 = 1 column.
-        assert!(pos.values().all(|p| p.x <= LAYOUT_COLUMN_SPACING));
+    fn canvas_and_world_round_trip_with_y_flipped() {
+        assert_eq!(canvas_to_world((220.0, 120.0)), Vec2::new(220.0, -120.0));
+        assert_eq!(world_to_canvas(Vec2::new(220.0, -120.0)), (220.0, 120.0));
+        let p = (13.5, -7.25);
+        assert_eq!(world_to_canvas(canvas_to_world(p)), p);
     }
 }
