@@ -18,7 +18,9 @@
 //! - press near an edge line → select the edge;
 //! - press on empty space → clear the selection;
 //! - Delete/Backspace → queue [`EditorCommand::RemoveNode`] or
-//!   [`EditorCommand::Disconnect`] for the selection.
+//!   [`EditorCommand::Disconnect`] for the selection (the key arrives as
+//!   [`EditorPointer::delete_just_pressed`], raised by
+//!   [`super::inspect::route_keys`] unless a parameter value is being typed).
 //!
 //! The graph is never mutated here; everything goes through the command queue
 //! so the core stays the single source of truth.
@@ -27,6 +29,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
+use super::inspect::{EditorKeys, ParamInspector, route_keys};
 use super::layout::{
     EDGE_HIT_DISTANCE, PinSide, distance_to_segment, pin_at, point_in_rect, port_anchor,
     world_to_canvas,
@@ -89,8 +92,9 @@ pub enum DragState {
 pub struct EditorDrag(pub DragState);
 
 /// Headless interaction plugin. Adds [`PipeGraphEditorPlugin`] if it is not
-/// already present, and runs [`handle_pointer`] before the core systems so
-/// commands queued by a gesture are applied in the same frame.
+/// already present, and runs keyboard routing ([`route_keys`]) then
+/// [`handle_pointer`] before the core systems, so commands queued by a key,
+/// a gesture or an edit are applied in the same frame.
 pub struct PipeGraphInteractPlugin;
 
 impl Plugin for PipeGraphInteractPlugin {
@@ -101,7 +105,14 @@ impl Plugin for PipeGraphInteractPlugin {
         app.init_resource::<EditorPointer>()
             .init_resource::<EditorSelection>()
             .init_resource::<EditorDrag>()
-            .add_systems(Update, handle_pointer.before(EditorCoreSystems));
+            .init_resource::<EditorKeys>()
+            .init_resource::<ParamInspector>()
+            .add_systems(
+                Update,
+                (route_keys, handle_pointer)
+                    .chain()
+                    .before(EditorCoreSystems),
+            );
     }
 }
 

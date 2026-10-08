@@ -121,8 +121,10 @@ Bevy); UI frontends adapt to it. The pieces:
   drags (recorded with `MoveNode`), selection and
   `Connect`/`RemoveNode`/`Disconnect` commands; `PipeGraphRenderPlugin` draws
   boxes, pins (from `Registry::ports_of`) and edges with gizmos, the status
-  line and the selected node's live preview, and feeds it real mouse/keyboard
-  input (Space plays/pauses). Try it with
+  line, a parameter inspector for the selected node (Tab/Enter/Esc to pick,
+  edit and apply a value, which rebuilds the pipeline live) and the selected
+  node's live preview, and feeds it real mouse/keyboard input (Space
+  plays/pauses). Try it with
   `cargo run --features bevy --example editor`.
 
 Realizing the vision above: an `Entity`'s `label` is a `NodeId`; its `inputs` /

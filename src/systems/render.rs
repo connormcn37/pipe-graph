@@ -10,7 +10,10 @@
 //!   edges and the wire being dragged, with immediate-mode gizmos — they are
 //!   re-derived from the graph every frame, so there is no edge entity state to
 //!   keep in sync.
-//! - [`toggle_playback`] maps Space to [`EditorRun::playing`].
+//! - [`gather_key_input`] fills [`EditorKeys`] with this frame's key presses,
+//!   in order; [`super::route_keys`] decides what they mean (parameter
+//!   editing, play/pause, delete). [`update_inspector_text`] draws the
+//!   parameter inspector panel.
 //! - [`update_status_text`] shows play state and the session's last error in a
 //!   screen-space line; [`update_preview`] shows the selected node's latest
 //!   output frame (from [`EditorPreview`]'s tap) under its box, re-uploading
@@ -22,16 +25,22 @@
 use std::collections::HashMap;
 
 use bevy::asset::RenderAssetUsages;
+use bevy::input::ButtonState;
+use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::sprite::Anchor;
 use bevy::window::PrimaryWindow;
 
+use super::inspect::{EditKey, EditorKeys, ParamInspector, inspector_text};
 use super::interact::{
     DragState, EditorDrag, EditorPointer, EditorSelection, PipeGraphInteractPlugin, Selection,
     edge_segments, handle_pointer,
 };
-use super::layout::{HEADER_HEIGHT, PIN_RADIUS, PinSide, pin_offset, pin_positions, side_ports};
+use super::layout::{
+    KIND_FONT_SIZE, PIN_RADIUS, PinSide, TITLE_FONT_SIZE, fit_label, header_line_offsets,
+    header_text_width, pin_offset, pin_positions, side_ports,
+};
 use super::preview::frame_to_rgba8;
 use super::{EditorPreview, EditorRun, EditorStatus, GraphResource, NodeShape, NodeView};
 use crate::graph::NodeId;
@@ -64,29 +73,30 @@ impl Plugin for PipeGraphRenderPlugin {
         if !app.is_plugin_added::<PipeGraphInteractPlugin>() {
             app.add_plugins(PipeGraphInteractPlugin);
         }
-        app.add_systems(Startup, spawn_status_text).add_systems(
-            Update,
-            (
-                gather_pointer_input.before(handle_pointer),
-                toggle_playback.before(super::EditorCoreSystems),
-                attach_node_visuals,
-                draw_graph.after(handle_pointer),
-                update_status_text.after(super::EditorCoreSystems),
-                update_preview.after(super::EditorCoreSystems),
-            ),
-        );
+        app.add_systems(Startup, (spawn_status_text, spawn_inspector_text))
+            .add_systems(
+                Update,
+                (
+                    (gather_pointer_input, gather_key_input).before(super::route_keys),
+                    update_inspector_text.after(super::EditorCoreSystems),
+                    attach_node_visuals,
+                    draw_graph.after(handle_pointer),
+                    update_status_text.after(super::EditorCoreSystems),
+                    update_preview.after(super::EditorCoreSystems),
+                ),
+            );
     }
 }
 
 /// Fill [`EditorPointer`] from the primary window's cursor (converted to world
-/// space through the 2D camera), the left mouse button and Delete/Backspace.
+/// space through the 2D camera) and the left mouse button. Keys are gathered
+/// separately ([`gather_key_input`]) and routed by [`super::route_keys`].
 ///
 /// Edge flags are OR-ed in rather than overwritten: `handle_pointer` clears
 /// them once consumed, so nothing is lost if both ever ran out of step.
 pub fn gather_pointer_input(
     mut pointer: ResMut<EditorPointer>,
     mouse: Res<ButtonInput<MouseButton>>,
-    keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
 ) {
@@ -101,7 +111,40 @@ pub fn gather_pointer_input(
     pointer.pressed = mouse.pressed(MouseButton::Left);
     pointer.just_pressed |= mouse.just_pressed(MouseButton::Left);
     pointer.just_released |= mouse.just_released(MouseButton::Left);
-    pointer.delete_just_pressed |= keys.any_just_pressed([KeyCode::Delete, KeyCode::Backspace]);
+}
+
+/// Fill [`EditorKeys`] with this frame's key presses, in the order they
+/// happened. Auto-repeat is kept for typed characters and Backspace/Delete
+/// (holding them should keep going) but dropped for Tab, Enter, Esc and Space,
+/// so holding Enter does not alternate between starting and applying an edit,
+/// nor holding Space flicker play/pause.
+pub fn gather_key_input(mut events: MessageReader<KeyboardInput>, mut keys: ResMut<EditorKeys>) {
+    for event in events.read() {
+        if event.state != ButtonState::Pressed {
+            continue;
+        }
+        let (pressed, repeats): (Vec<EditKey>, bool) = match &event.logical_key {
+            Key::Tab => (vec![EditKey::Tab], false),
+            Key::Enter => (vec![EditKey::Enter], false),
+            Key::Escape => (vec![EditKey::Escape], false),
+            Key::Space => (vec![EditKey::Char(' ')], false),
+            Key::Backspace => (vec![EditKey::Backspace], true),
+            Key::Delete => (vec![EditKey::Delete], true),
+            _ => (
+                event
+                    .text
+                    .iter()
+                    .flat_map(|text| text.chars())
+                    .filter(|c| !c.is_control())
+                    .map(EditKey::Char)
+                    .collect(),
+                true,
+            ),
+        };
+        if repeats || !event.repeat {
+            keys.0.extend(pressed);
+        }
+    }
 }
 
 /// Give each new node view a filled box sprite, a title and port labels. The
@@ -112,14 +155,22 @@ pub fn attach_node_visuals(
     added: Query<(Entity, &NodeView, &NodeShape), Added<NodeView>>,
 ) {
     for (entity, view, shape) in &added {
-        let title = format!("{} ({})", view.id.0, shape.kind);
+        // Two header lines, each shortened to fit the fixed-width box: the
+        // id (what the user named it) and, smaller and dimmer, its kind.
+        let (title_y, kind_y) = header_line_offsets(shape.size.y);
         let mut node = commands.entity(entity);
         node.insert(Sprite::from_color(BOX_FILL, shape.size));
         node.with_child((
-            Text2d::new(title),
-            TextFont::from_font_size(14.0),
+            Text2d::new(fit_label(&view.id.0, TITLE_FONT_SIZE, header_text_width())),
+            TextFont::from_font_size(TITLE_FONT_SIZE),
             TextColor(TITLE),
-            Transform::from_xyz(0.0, shape.size.y / 2.0 - HEADER_HEIGHT / 2.0, 1.0),
+            Transform::from_xyz(0.0, title_y, 1.0),
+        ));
+        node.with_child((
+            Text2d::new(fit_label(&shape.kind, KIND_FONT_SIZE, header_text_width())),
+            TextFont::from_font_size(KIND_FONT_SIZE),
+            TextColor(PORT_LABEL),
+            Transform::from_xyz(0.0, kind_y, 1.0),
         ));
         for side in [PinSide::Input, PinSide::Output] {
             // Labels sit just inside the box, next to their pin.
@@ -190,13 +241,6 @@ pub fn draw_graph(
     {
         let start = super::layout::port_anchor(*center, &shape.ports, *side, &port.0);
         gizmos.line_2d(start, *cursor, WIRE);
-    }
-}
-
-/// Space toggles playback.
-pub fn toggle_playback(keys: Res<ButtonInput<KeyCode>>, mut run: ResMut<EditorRun>) {
-    if keys.just_pressed(KeyCode::Space) {
-        run.playing = !run.playing;
     }
 }
 
@@ -343,4 +387,44 @@ pub fn update_preview(
             ));
         }
     }
+}
+
+/// Marker for the screen-space parameter inspector panel.
+#[derive(Component)]
+pub struct InspectorText;
+
+pub fn spawn_inspector_text(mut commands: Commands) {
+    commands.spawn((
+        InspectorText,
+        Text::new(""),
+        TextFont::from_font_size(14.0),
+        TextColor(STATUS),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(8.0),
+            right: Val::Px(10.0),
+            ..default()
+        },
+    ));
+}
+
+/// Show the selected node's parameters (see [`super::inspect`]); empty when
+/// nothing is selected. Highlighted while a value is being edited.
+pub fn update_inspector_text(
+    inspector: Res<ParamInspector>,
+    graph: Res<GraphResource>,
+    mut text: Query<(&mut Text, &mut TextColor), With<InspectorText>>,
+) {
+    if !inspector.is_changed() && !graph.is_changed() {
+        return;
+    }
+    let Ok((mut text, mut color)) = text.single_mut() else {
+        return;
+    };
+    text.0 = inspector_text(&inspector, &graph.0).unwrap_or_default();
+    color.0 = if inspector.is_editing() {
+        SELECTED
+    } else {
+        STATUS
+    };
 }
