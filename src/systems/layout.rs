@@ -19,8 +19,22 @@ use crate::graph::PortId;
 /// Width of every node box. Fixed so labels line up and pins sit on a
 /// predictable edge; height grows with the port count instead.
 pub const NODE_WIDTH: f32 = 170.0;
-/// Space at the top of a box reserved for the node's title label.
-pub const HEADER_HEIGHT: f32 = 28.0;
+/// Space at the top of a box reserved for the node's title: its id on one
+/// line and, smaller, its kind on the next.
+pub const HEADER_HEIGHT: f32 = 40.0;
+/// Font size of the node id line in the header.
+pub const TITLE_FONT_SIZE: f32 = 14.0;
+/// Font size of the node kind line in the header.
+pub const KIND_FONT_SIZE: f32 = 11.0;
+/// Horizontal padding kept clear on each side of header text.
+pub const TITLE_PADDING: f32 = 8.0;
+/// Glyph advance as a fraction of the font size. Exact for Bevy's default font
+/// (monospaced Fira Mono, 0.6 em). Only an average for a proportional font,
+/// where a run of wide glyphs (`WWWW`) can still overflow.
+const GLYPH_ADVANCE_EM: f32 = 0.6;
+/// What a shortened label ends with. ASCII on purpose: Bevy's default font is
+/// an ASCII subset with no glyph for `…`.
+const ELLIPSIS: &str = "...";
 /// Vertical distance between consecutive pins on one side.
 pub const PIN_SPACING: f32 = 22.0;
 /// Drawn radius of a pin.
@@ -47,6 +61,45 @@ impl PinSide {
             PinSide::Output => PinSide::Input,
         }
     }
+}
+
+/// `text` shortened with a trailing `...` so it fits in `max_width` at
+/// `font_size`, or unchanged if it already fits.
+///
+/// Node boxes have a fixed width (so pins line up), so a long id or kind is
+/// truncated rather than spilling over the box edge and into its neighbours.
+/// Width is estimated from the character count, which is exact for the
+/// default monospaced font.
+pub fn fit_label(text: &str, font_size: f32, max_width: f32) -> String {
+    let advance = font_size * GLYPH_ADVANCE_EM;
+    let fits = (max_width / advance).floor().max(0.0) as usize;
+    let len = text.chars().count();
+    if len <= fits {
+        return text.to_string();
+    }
+    let marker = ELLIPSIS.chars().count();
+    if fits <= marker {
+        return ".".repeat(fits);
+    }
+    let mut out: String = text.chars().take(fits - marker).collect();
+    out.push_str(ELLIPSIS);
+    out
+}
+
+/// Vertical offsets, from a node's center, of the two header lines (the id,
+/// then the kind) in a box of height `box_height`: each line centered in its
+/// share of [`HEADER_HEIGHT`], split in proportion to the two font sizes.
+pub fn header_line_offsets(box_height: f32) -> (f32, f32) {
+    let top = box_height / 2.0;
+    let unit = HEADER_HEIGHT / (TITLE_FONT_SIZE + KIND_FONT_SIZE);
+    let title_h = TITLE_FONT_SIZE * unit;
+    let kind_h = KIND_FONT_SIZE * unit;
+    (top - title_h / 2.0, top - title_h - kind_h / 2.0)
+}
+
+/// The width available to header text inside a node box.
+pub fn header_text_width() -> f32 {
+    NODE_WIDTH - 2.0 * TITLE_PADDING
 }
 
 /// Size of a node's box for the given ports. Always at least one pin row tall
@@ -272,5 +325,32 @@ mod tests {
         assert_eq!(world_to_canvas(Vec2::new(220.0, -120.0)), (220.0, 120.0));
         let p = (13.5, -7.25);
         assert_eq!(world_to_canvas(canvas_to_world(p)), p);
+    }
+
+    #[test]
+    fn labels_that_fit_are_kept_and_long_ones_get_an_ellipsis() {
+        // 14px * 0.6 = 8.4px per char; 154px fits 18 chars.
+        let width = header_text_width();
+        assert_eq!(width, 154.0);
+        assert_eq!(fit_label("clear_green", 14.0, width), "clear_green");
+        let long = "a_really_long_node_identifier";
+        let fitted = fit_label(long, 14.0, width);
+        assert_eq!(fitted, "a_really_long_n...");
+        assert_eq!(fitted.chars().count(), 18);
+        assert!(fitted.is_ascii(), "the default font has no glyph for '…'");
+        // Exactly at the limit: unchanged.
+        let eighteen = "x".repeat(18);
+        assert_eq!(fit_label(&eighteen, 14.0, width), eighteen);
+        // Room for no more than the marker: just dots, never too wide.
+        assert_eq!(fit_label("abcdef", 14.0, 20.0), "..");
+        assert_eq!(fit_label("abc", 14.0, 1.0), "");
+    }
+
+    #[test]
+    fn header_lines_sit_inside_the_header_in_order() {
+        let size = node_size(&ports(&["in"], &["out"]));
+        let (title, kind) = header_line_offsets(size.y);
+        let top = size.y / 2.0;
+        assert!(top > title && title > kind && kind > top - HEADER_HEIGHT);
     }
 }
