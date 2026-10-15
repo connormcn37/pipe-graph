@@ -8,6 +8,10 @@
 //! merge) running live on a generated test pattern:
 //!
 //! - click a node to select it and see its latest output frame under it;
+//! - the selected node's parameters are listed top right: Tab picks one,
+//!   Enter edits it (type, Backspace), Enter again applies it and the
+//!   pipeline rebuilds live, Esc cancels — try `channels` on `split`/`merge`
+//!   or `channel` on a `clear_*` node;
 //! - Space pauses/resumes the pipeline (the status line, top left, shows the
 //!   frame count and any build or run error);
 //! - drag a node's body to move it; drag from an output pin (right side) to an

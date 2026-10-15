@@ -22,18 +22,21 @@
 //!   command application, view sync, running ([`EditorRun`]), the selected
 //!   node's preview tap ([`EditorPreview`]) and a status summary
 //!   ([`EditorStatus`]). Works under `MinimalPlugins`.
-//! - [`PipeGraphInteractPlugin`] ([`interact`]) — turns an abstract pointer
-//!   state ([`EditorPointer`]) into node moves, selection and queued
-//!   `EditorCommand`s. Also headless: it never reads windows or devices, so
-//!   tests drive it by writing the pointer resource directly.
+//! - [`PipeGraphInteractPlugin`] ([`interact`], [`inspect`]) — turns an
+//!   abstract pointer state ([`EditorPointer`]) into node moves, selection and
+//!   queued `EditorCommand`s, and routes abstract keystrokes ([`EditorKeys`])
+//!   to parameter edits through the [`ParamInspector`] or to shortcuts
+//!   (play/pause, delete). Also headless: it never reads windows or devices,
+//!   so tests drive it by writing those resources.
 //! - [`PipeGraphRenderPlugin`] ([`render`]) — the only part that needs a
 //!   window/renderer: fills [`EditorPointer`] from mouse/keyboard, gives views
 //!   sprites and labels, draws pins and edges with gizmos, and shows the
-//!   status line and the selected node's preview image.
+//!   status line, the parameter inspector and the selected node's preview.
 //!
 //! Geometry shared by rendering and hit testing lives in [`layout`] as plain
 //! functions, so "where is this pin" has exactly one answer.
 
+pub mod inspect;
 pub mod interact;
 pub mod layout;
 pub mod preview;
@@ -46,6 +49,7 @@ use crate::editor::{EditorCommand, LiveSession, SessionError, view_diff};
 use crate::exec::{PortSet, Tap, builtin_registry};
 use crate::graph::{Graph, NodeId, Params, PortId};
 
+pub use self::inspect::{EditKey, EditorKeys, ParamInspector, route_keys};
 pub use self::interact::{
     DragState, EditorDrag, EditorPointer, EditorSelection, PipeGraphInteractPlugin, Selection,
     handle_pointer,
