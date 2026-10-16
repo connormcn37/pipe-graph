@@ -8,13 +8,15 @@
 
 use std::sync::Arc;
 
-use crate::data::Frame;
+use crate::data::{AudioBuffer, Frame, Meta};
 
 #[derive(Debug, Clone)]
 pub enum Payload {
     Frame(Frame),
     Scalar(f64),
     Bytes(Arc<[u8]>),
+    /// Audio is carried but not yet processed; see [`AudioBuffer`].
+    Audio(AudioBuffer),
 }
 
 /// The type tag of a payload, used to declare and validate port compatibility.
@@ -26,6 +28,7 @@ pub enum PayloadKind {
     Frame,
     Scalar,
     Bytes,
+    Audio,
     Any,
 }
 
@@ -43,6 +46,33 @@ impl Payload {
             Payload::Frame(_) => PayloadKind::Frame,
             Payload::Scalar(_) => PayloadKind::Scalar,
             Payload::Bytes(_) => PayloadKind::Bytes,
+            Payload::Audio(_) => PayloadKind::Audio,
+        }
+    }
+
+    /// The metadata of a frame or audio buffer; `None` for payloads that
+    /// carry none (scalars, raw bytes).
+    pub fn meta(&self) -> Option<&Meta> {
+        match self {
+            Payload::Frame(f) => Some(f.meta()),
+            Payload::Audio(a) => Some(&a.meta),
+            Payload::Scalar(_) | Payload::Bytes(_) => None,
+        }
+    }
+
+    /// Mutable access to [`Payload::meta`].
+    pub fn meta_mut(&mut self) -> Option<&mut Meta> {
+        match self {
+            Payload::Frame(f) => Some(f.meta_mut()),
+            Payload::Audio(a) => Some(&mut a.meta),
+            Payload::Scalar(_) | Payload::Bytes(_) => None,
+        }
+    }
+
+    pub fn as_audio(&self) -> Option<&AudioBuffer> {
+        match self {
+            Payload::Audio(a) => Some(a),
+            _ => None,
         }
     }
 

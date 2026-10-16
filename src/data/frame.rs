@@ -5,6 +5,12 @@
 //! pixel). The element type is chosen by `dtype` (`u8` or `f32`). This makes
 //! per-channel ops, cropping, and split/merge index math straightforward, and
 //! lets the pipeline carry more than just 8-bit RGB.
+//!
+//! A frame also carries [`Meta`] (timestamp, frame number, colour space).
+//! Metadata is an annotation, not content: two frames are equal when their
+//! shape and samples are, whatever their metadata.
+
+use crate::data::Meta;
 
 /// Element type of a frame's buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -42,13 +48,24 @@ impl FrameData {
 }
 
 /// A generic interleaved frame buffer.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Frame {
     pub width: u32,
     pub height: u32,
     pub channels: u32,
     dtype: DType,
     data: FrameData,
+    meta: Meta,
+}
+
+/// Equality is shape and samples only; see the module docs.
+impl PartialEq for Frame {
+    fn eq(&self, other: &Self) -> bool {
+        self.width == other.width
+            && self.height == other.height
+            && self.channels == other.channels
+            && self.data == other.data
+    }
 }
 
 impl Frame {
@@ -74,6 +91,7 @@ impl Frame {
             channels,
             dtype,
             data,
+            meta: Meta::default(),
         }
     }
 
@@ -90,6 +108,7 @@ impl Frame {
             channels,
             dtype,
             data,
+            meta: Meta::default(),
         }
     }
 
@@ -122,6 +141,20 @@ impl Frame {
 
     pub fn dtype(&self) -> DType {
         self.dtype
+    }
+
+    pub fn meta(&self) -> &Meta {
+        &self.meta
+    }
+
+    pub fn meta_mut(&mut self) -> &mut Meta {
+        &mut self.meta
+    }
+
+    /// This frame with `meta` attached (builder style, for sources).
+    pub fn with_meta(mut self, meta: Meta) -> Self {
+        self.meta = meta;
+        self
     }
 
     /// Number of pixels (`width * height`).
@@ -201,6 +234,18 @@ mod tests {
         assert_eq!(f.len(), 4 * 3 * 2);
         assert!(f.as_f32().unwrap().iter().all(|&x| x == 0.0));
         assert!(f.as_u8().is_none());
+    }
+
+    #[test]
+    fn equality_ignores_metadata() {
+        let a = Frame::from_rgb8(1, 1, vec![(1, 2, 3)]);
+        let b = a.clone().with_meta(Meta {
+            frame_index: Some(7),
+            ..Meta::default()
+        });
+        assert_eq!(a, b);
+        assert_eq!(b.meta().frame_index, Some(7));
+        assert!(a.meta().is_unset());
     }
 
     #[test]

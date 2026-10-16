@@ -911,14 +911,11 @@ impl Runtime {
 
     fn eval_node(&mut self, id: &NodeId) -> Result<(), RunError> {
         let inputs = self.gather(id);
-        let mut outputs = Outputs::new();
-        {
-            let node = self.nodes.get_mut(id).expect("compiled node exists");
-            node.eval(&inputs, &mut outputs).map_err(|error| RunError {
-                node: id.clone(),
-                error,
-            })?;
-        }
+        let node = self.nodes.get_mut(id).expect("compiled node exists");
+        let outputs = run_eval(node, &inputs).map_err(|error| RunError {
+            node: id.clone(),
+            error,
+        })?;
         self.commit(id, outputs);
         Ok(())
     }
@@ -1091,9 +1088,8 @@ impl Runtime {
             let mut pending: Vec<(NodeId, Outputs)> = Vec::with_capacity(nodes.len());
             for id in nodes {
                 let inputs = self.gather(id);
-                let mut outputs = Outputs::new();
                 let node = self.nodes.get_mut(id).expect("compiled node exists");
-                node.eval(&inputs, &mut outputs).map_err(|error| RunError {
+                let outputs = run_eval(node, &inputs).map_err(|error| RunError {
                     node: id.clone(),
                     error,
                 })?;
@@ -1161,13 +1157,11 @@ impl Runtime {
 
     /// Call `id`'s [`Node::eval`] on `inputs`, attributing a failure to `id`.
     fn eval_with(&mut self, id: &NodeId, inputs: &Inputs) -> Result<Outputs, RunError> {
-        let mut outputs = Outputs::new();
         let node = self.nodes.get_mut(id).expect("compiled node exists");
-        node.eval(inputs, &mut outputs).map_err(|error| RunError {
+        run_eval(node, inputs).map_err(|error| RunError {
             node: id.clone(),
             error,
-        })?;
-        Ok(outputs)
+        })
     }
 
     /// Finish a non-tail member of a fused run: publish its outputs to taps and
@@ -1315,9 +1309,39 @@ impl Runtime {
 /// Evaluate one node against already-gathered inputs, touching nothing else in
 /// the runtime — the unit of work a parallel batch hands to a thread.
 fn eval_detached(node: &mut Box<dyn Node>, inputs: &Inputs) -> Result<Outputs, NodeError> {
+    run_eval(node, inputs)
+}
+
+/// Run `node`'s [`Node::eval`] on `inputs`, then let its outputs inherit the
+/// inputs' metadata — the one place every evaluation path goes through.
+fn run_eval(node: &mut Box<dyn Node>, inputs: &Inputs) -> Result<Outputs, NodeError> {
     let mut outputs = Outputs::new();
     node.eval(inputs, &mut outputs)?;
+    inherit_meta(inputs, &mut outputs);
     Ok(outputs)
+}
+
+/// Carry stream metadata (timestamp, frame number, colour space) from a
+/// node's inputs to its outputs, so stages pass it through without having to
+/// know it exists.
+///
+/// An output that set any metadata of its own keeps it. Only a freshly made,
+/// uniquely owned output is touched: a value a node republishes through
+/// [`Outputs::set_shared`] may be cached by that node or seen elsewhere, so it
+/// is never mutated (or copied just to stamp it). Values transformed by
+/// [`Node::eval_in_place`] are handled the same way in [`eval_member`].
+fn inherit_meta(inputs: &Inputs, outputs: &mut Outputs) {
+    let Some(lead) = inputs.lead_meta() else {
+        return;
+    };
+    for value in outputs.values_mut() {
+        if let Some(payload) = Arc::get_mut(value)
+            && let Some(meta) = payload.meta_mut()
+            && meta.is_unset()
+        {
+            *meta = lead;
+        }
+    }
 }
 
 /// How a non-head member of a fused run is fed. See [`Runtime::member_wiring`].
@@ -1364,9 +1388,18 @@ fn eval_member(
     if let Some((input, output)) = &wiring.in_place
         && let Some(value) = shared.remove(input)
     {
+        let lead = value.meta().copied().filter(|m| !m.is_unset());
         match Arc::try_unwrap(value) {
             Ok(mut payload) => match node.eval_in_place(&mut payload) {
                 Some(Ok(())) => {
+                    // A stage may rebuild the value outright (crop, cast);
+                    // keep the input's metadata unless it set its own.
+                    if let Some(lead) = lead
+                        && let Some(meta) = payload.meta_mut()
+                        && meta.is_unset()
+                    {
+                        *meta = lead;
+                    }
                     let mut outputs = Outputs::new();
                     outputs.set(&output.0, payload);
                     return Ok(outputs);
@@ -1383,9 +1416,7 @@ fn eval_member(
         }
     }
 
-    let mut outputs = Outputs::new();
-    node.eval(&Inputs::from_shared(shared), &mut outputs)?;
-    Ok(outputs)
+    run_eval(node, &Inputs::from_shared(shared))
 }
 
 /// A unit of work in a parallel level: one node, or a whole fused run.

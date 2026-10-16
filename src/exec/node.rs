@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::data::{Frame, Payload, PayloadKind};
+use crate::data::{Frame, Meta, Payload, PayloadKind};
 use crate::graph::PortId;
 use crate::traits::Processor;
 
@@ -142,6 +142,17 @@ impl Inputs {
         self.values.get(port).cloned()
     }
 
+    /// The metadata a node's outputs inherit by default: that of the first
+    /// input (by port name) carrying any. Port-name order makes the choice
+    /// deterministic, e.g. `in0` for a merge.
+    pub fn lead_meta(&self) -> Option<Meta> {
+        let mut ports: Vec<&PortId> = self.values.keys().collect();
+        ports.sort_by(|a, b| a.0.cmp(&b.0));
+        ports
+            .into_iter()
+            .find_map(|port| self.values[port].meta().filter(|m| !m.is_unset()).copied())
+    }
+
     /// Require a `Frame` on `port`, erroring if absent or the wrong kind.
     pub fn frame(&self, port: &str) -> Result<&Frame, NodeError> {
         match self.get(port) {
@@ -203,6 +214,11 @@ impl Outputs {
     /// The shared handle for `port`, if it produced one.
     pub fn get_shared(&self, port: &str) -> Option<Arc<Payload>> {
         self.values.get(port).cloned()
+    }
+
+    /// Every published value, mutably (for the scheduler's metadata pass).
+    pub(crate) fn values_mut(&mut self) -> impl Iterator<Item = &mut Arc<Payload>> {
+        self.values.values_mut()
     }
 
     /// Consume the outputs as a raw port→payload map (used by the scheduler).
