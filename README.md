@@ -42,6 +42,8 @@ Bevy); UI frontends adapt to it. The pieces:
   `Graph::to_text`/`from_text` save and load a deterministic, line-oriented
   text format (`node <id> <kind> k=v`, `edge a.out -> b.in`); try
   `cargo run --example run_graph -- examples/graphs/split_merge.graph 1 --input src.in=4x4x3:200`.
+  Version 2 files (`pipe-graph 2` header) can also carry the editor layout as
+  `pos <id> <x> <y>` lines (`GraphDocument`); headerless v1 files still load.
 - **`traits::Processor`** — the original single-in/single-out `&mut Frame`
   transform (e.g. `ClearChannel`, `ProcessList`), still supported.
 - **`exec`** — the execution layer:
@@ -130,7 +132,9 @@ Bevy); UI frontends adapt to it. The pieces:
   edit and apply a value, which rebuilds the pipeline live) and the selected
   node's live preview, and feeds it real mouse/keyboard input (Space
   plays/pauses; middle/right-drag pans, the wheel zooms about the cursor, F
-  fits all nodes in view). Try it with
+  fits all nodes in view). All editor text uses a bundled Unicode monospace
+  font (DejaVu Sans Mono, embedded in the binary), so non-ASCII ids, values
+  and paths render. Try it with
   `cargo run --features bevy --example editor`.
 
 - **GPU (`gpu` feature, wgpu):** a `Frame`'s samples live in a `Storage`

@@ -28,13 +28,17 @@ pub const TITLE_FONT_SIZE: f32 = 14.0;
 pub const KIND_FONT_SIZE: f32 = 11.0;
 /// Horizontal padding kept clear on each side of header text.
 pub const TITLE_PADDING: f32 = 8.0;
-/// Glyph advance as a fraction of the font size. Exact for Bevy's default font
-/// (monospaced Fira Mono, 0.6 em). Only an average for a proportional font,
-/// where a run of wide glyphs (`WWWW`) can still overflow.
-const GLYPH_ADVANCE_EM: f32 = 0.6;
-/// What a shortened label ends with. ASCII on purpose: Bevy's default font is
-/// an ASCII subset with no glyph for `…`.
-const ELLIPSIS: &str = "...";
+/// Glyph advance as a fraction of the font size. The editor's bundled font
+/// (DejaVu Sans Mono, see [`super::font`]) is monospaced at 1233/2048 ≈ 0.602
+/// em; 0.6 keeps the estimate a hair under, which the `floor` in
+/// [`fit_label`] more than absorbs at editor font sizes. Only an average for a
+/// proportional font, where a run of wide glyphs (`WWWW`) can still overflow.
+pub(super) const GLYPH_ADVANCE_EM: f32 = 0.6;
+/// What a shortened label ends with: a single `…`, so truncation costs one
+/// column rather than three. Safe because the bundled editor font has the
+/// glyph (Bevy's ASCII-only default font did not, which is why this used to
+/// be `...`).
+const ELLIPSIS: &str = "…";
 /// Vertical distance between consecutive pins on one side.
 pub const PIN_SPACING: f32 = 22.0;
 /// Drawn radius of a pin.
@@ -63,13 +67,13 @@ impl PinSide {
     }
 }
 
-/// `text` shortened with a trailing `...` so it fits in `max_width` at
+/// `text` shortened with a trailing `…` so it fits in `max_width` at
 /// `font_size`, or unchanged if it already fits.
 ///
 /// Node boxes have a fixed width (so pins line up), so a long id or kind is
 /// truncated rather than spilling over the box edge and into its neighbours.
 /// Width is estimated from the character count, which is exact for the
-/// default monospaced font.
+/// editor's monospaced font. If not even the `…` fits, the result is empty.
 pub fn fit_label(text: &str, font_size: f32, max_width: f32) -> String {
     let advance = font_size * GLYPH_ADVANCE_EM;
     let fits = (max_width / advance).floor().max(0.0) as usize;
@@ -77,11 +81,12 @@ pub fn fit_label(text: &str, font_size: f32, max_width: f32) -> String {
     if len <= fits {
         return text.to_string();
     }
-    let marker = ELLIPSIS.chars().count();
-    if fits <= marker {
-        return ".".repeat(fits);
+    // The marker is one char wide, so it needs one column; with none to
+    // spare, nothing at all is safer than overflowing the box.
+    if fits == 0 {
+        return String::new();
     }
-    let mut out: String = text.chars().take(fits - marker).collect();
+    let mut out: String = text.chars().take(fits - 1).collect();
     out.push_str(ELLIPSIS);
     out
 }
@@ -335,14 +340,24 @@ mod tests {
         assert_eq!(fit_label("clear_green", 14.0, width), "clear_green");
         let long = "a_really_long_node_identifier";
         let fitted = fit_label(long, 14.0, width);
-        assert_eq!(fitted, "a_really_long_n...");
+        assert_eq!(fitted, "a_really_long_nod…");
         assert_eq!(fitted.chars().count(), 18);
-        assert!(fitted.is_ascii(), "the default font has no glyph for '…'");
         // Exactly at the limit: unchanged.
         let eighteen = "x".repeat(18);
         assert_eq!(fit_label(&eighteen, 14.0, width), eighteen);
-        // Room for no more than the marker: just dots, never too wide.
-        assert_eq!(fit_label("abcdef", 14.0, 20.0), "..");
+        // Width is counted in chars, not bytes: non-ASCII text that fits is
+        // kept, and truncation never splits a multi-byte char.
+        let greek = "λ".repeat(18);
+        assert_eq!(fit_label(&greek, 14.0, width), greek);
+        let cyrillic = format!("{}Ж", "é".repeat(18));
+        assert_eq!(
+            fit_label(&cyrillic, 14.0, width),
+            format!("{}…", "é".repeat(17))
+        );
+        // Two columns: one char and the marker; one: just the marker; none:
+        // nothing, never too wide.
+        assert_eq!(fit_label("abcdef", 14.0, 20.0), "a…");
+        assert_eq!(fit_label("abcdef", 14.0, 10.0), "…");
         assert_eq!(fit_label("abc", 14.0, 1.0), "");
     }
 

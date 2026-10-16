@@ -20,11 +20,16 @@ bevy = { version = "0.18.0", optional = true }
 wgpu = { version = "27", optional = true }
 pollster = { version = "0.4", optional = true }
 
+[dev-dependencies]
+# Only for tests that inspect the bundled editor font's glyph coverage and
+# advance widths. Pinned to the version Bevy's text stack already pulls in, so
+# it adds nothing new to the dependency tree.
+ttf-parser = "=0.25.1"
+
 # Benchmarks only (never linked into the library). Default features are off to
 # keep the dev build lean: no `rayon` (criterion's own parallel analysis is not
 # needed for a handful of benches). `plotters` + `html_reports` are kept so the
 # manually-run bench workflow can upload a browsable HTML report.
-[dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = [
     "cargo_bench_support",
     "html_reports",

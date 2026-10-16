@@ -1,0 +1,5 @@
+node a passthrough
+node b passthrough
+edge a.out -> b.in
+edge b.out -> a.in
+edge a.out -> a.in

@@ -38,6 +38,7 @@
 //! functions, so "where is this pin" has exactly one answer.
 
 pub mod camera;
+pub mod font;
 pub mod inspect;
 pub mod interact;
 pub mod layout;
