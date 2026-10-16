@@ -3675,6 +3675,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "pollster",
+ "ttf-parser",
  "wgpu",
 ]
 

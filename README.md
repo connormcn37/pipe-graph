@@ -129,7 +129,9 @@ Bevy); UI frontends adapt to it. The pieces:
   edit and apply a value, which rebuilds the pipeline live) and the selected
   node's live preview, and feeds it real mouse/keyboard input (Space
   plays/pauses; middle/right-drag pans, the wheel zooms about the cursor, F
-  fits all nodes in view). Try it with
+  fits all nodes in view). All editor text uses a bundled Unicode monospace
+  font (DejaVu Sans Mono, embedded in the binary), so non-ASCII ids, values
+  and paths render. Try it with
   `cargo run --features bevy --example editor`.
 
 - **GPU (`gpu` feature, wgpu):** a `Frame`'s samples live in a `Storage`

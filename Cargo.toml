@@ -9,6 +9,12 @@ bevy = { version = "0.18.0", optional = true }
 wgpu = { version = "27", optional = true }
 pollster = { version = "0.4", optional = true }
 
+[dev-dependencies]
+# Only for tests that inspect the bundled editor font's glyph coverage and
+# advance widths. Pinned to the version Bevy's text stack already pulls in, so
+# it adds nothing new to the dependency tree.
+ttf-parser = "=0.25.1"
+
 [features]
 # Default to headless core runtime.
 default = []
