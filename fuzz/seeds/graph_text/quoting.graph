@@ -1,0 +1,8 @@
+# pipe-graph text format v1
+# Exercises quoting, escapes, CRLF, comments and edges declared before nodes.
+edge "my node".out -> "é ü"."in 0"
+node "my node" crop h=2 w=2 x=0 y=0
+node "é ü" "kind with \"quotes\"" "k=1"="v.2" tab="a\tb\\c\nd"	# trailing
+node a/b:c@d-1+2 cast dtype=f32
+edge a/b:c@d-1+2.out -> "my node".in
+edge "é ü".out->x -> a/b:c@d-1+2."#"

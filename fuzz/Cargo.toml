@@ -1,0 +1,38 @@
+# cargo-fuzz harness for the parsers that read untrusted bytes.
+#
+# A separate crate with its own (empty) `[workspace]`. The main crate neither
+# depends on it nor has a workspace containing it, so stable `cargo
+# build/clippy/test` at the repo root never compile it. Fuzzing needs
+# nightly: see README.md.
+[package]
+name = "pipe-graph-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.pipe-graph]
+path = ".."
+
+# Keep this crate out of any parent workspace.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "y4m_reader"
+path = "fuzz_targets/y4m_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "graph_text"
+path = "fuzz_targets/graph_text.rs"
+test = false
+doc = false
+bench = false
