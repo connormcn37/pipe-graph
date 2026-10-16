@@ -14,6 +14,7 @@
 //! - `f32`: the same weighted sum in float, unclamped (inputs assumed `[0, 1]`).
 
 use crate::data::{Frame, FrameData, Payload, PayloadKind};
+use crate::exec::KindInfo;
 use crate::exec::{BuildError, Inputs, Node, NodeError, Outputs, PortSet, PortSpec};
 use crate::graph::Params;
 
@@ -24,6 +25,18 @@ pub struct GrayscaleStage;
 impl GrayscaleStage {
     pub fn new() -> Self {
         Self
+    }
+}
+
+impl GrayscaleStage {
+    /// Parameter schema for this kind; kept beside `try_from` so the two
+    /// change together (cross-checked in `exec::registry` tests).
+    pub fn info() -> KindInfo {
+        KindInfo::new(
+            "grayscale",
+            "RGB(A) to 1-channel BT.601 luma (alpha dropped).",
+            vec![],
+        )
     }
 }
 
