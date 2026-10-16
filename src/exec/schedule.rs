@@ -911,14 +911,11 @@ impl Runtime {
 
     fn eval_node(&mut self, id: &NodeId) -> Result<(), RunError> {
         let inputs = self.gather(id);
-        let mut outputs = Outputs::new();
-        {
-            let node = self.nodes.get_mut(id).expect("compiled node exists");
-            node.eval(&inputs, &mut outputs).map_err(|error| RunError {
-                node: id.clone(),
-                error,
-            })?;
-        }
+        let node = self.nodes.get_mut(id).expect("compiled node exists");
+        let outputs = run_eval(node, &inputs).map_err(|error| RunError {
+            node: id.clone(),
+            error,
+        })?;
         self.commit(id, outputs);
         Ok(())
     }
@@ -1091,9 +1088,8 @@ impl Runtime {
             let mut pending: Vec<(NodeId, Outputs)> = Vec::with_capacity(nodes.len());
             for id in nodes {
                 let inputs = self.gather(id);
-                let mut outputs = Outputs::new();
                 let node = self.nodes.get_mut(id).expect("compiled node exists");
-                node.eval(&inputs, &mut outputs).map_err(|error| RunError {
+                let outputs = run_eval(node, &inputs).map_err(|error| RunError {
                     node: id.clone(),
                     error,
                 })?;
@@ -1161,13 +1157,11 @@ impl Runtime {
 
     /// Call `id`'s [`Node::eval`] on `inputs`, attributing a failure to `id`.
     fn eval_with(&mut self, id: &NodeId, inputs: &Inputs) -> Result<Outputs, RunError> {
-        let mut outputs = Outputs::new();
         let node = self.nodes.get_mut(id).expect("compiled node exists");
-        node.eval(inputs, &mut outputs).map_err(|error| RunError {
+        run_eval(node, inputs).map_err(|error| RunError {
             node: id.clone(),
             error,
-        })?;
-        Ok(outputs)
+        })
     }
 
     /// Finish a non-tail member of a fused run: publish its outputs to taps and
@@ -1240,22 +1234,24 @@ impl Runtime {
         }
     }
 
+    /// The inputs `id` sees this evaluation: external values first, then edge
+    /// values (which win where both exist). Every value is a shared handle to
+    /// what the producer published, so this copies no frames — see [`Inputs`].
     fn gather(&self, id: &NodeId) -> Inputs {
-        let mut values: HashMap<PortId, Payload> = HashMap::new();
-        // External inputs first; edge values override where both exist.
+        let mut values: HashMap<PortId, Arc<Payload>> = HashMap::new();
         if let Some(ext) = self.external.get(id) {
             for (port, value) in ext {
-                values.insert(port.clone(), value.as_ref().clone());
+                values.insert(port.clone(), value.clone());
             }
         }
         if let Some(edge_ids) = self.incoming.get(id) {
             for &i in edge_ids {
-                if let Some(payload) = self.edges[i].buffer.get_last() {
-                    values.insert(self.edges[i].to.1.clone(), payload.clone());
+                if let Some(payload) = self.edges[i].buffer.get_last_arc() {
+                    values.insert(self.edges[i].to.1.clone(), payload);
                 }
             }
         }
-        Inputs::new(values)
+        Inputs::from_shared(values)
     }
 
     fn commit(&mut self, id: &NodeId, outputs: Outputs) {
@@ -1313,9 +1309,39 @@ impl Runtime {
 /// Evaluate one node against already-gathered inputs, touching nothing else in
 /// the runtime — the unit of work a parallel batch hands to a thread.
 fn eval_detached(node: &mut Box<dyn Node>, inputs: &Inputs) -> Result<Outputs, NodeError> {
+    run_eval(node, inputs)
+}
+
+/// Run `node`'s [`Node::eval`] on `inputs`, then let its outputs inherit the
+/// inputs' metadata — the one place every evaluation path goes through.
+fn run_eval(node: &mut Box<dyn Node>, inputs: &Inputs) -> Result<Outputs, NodeError> {
     let mut outputs = Outputs::new();
     node.eval(inputs, &mut outputs)?;
+    inherit_meta(inputs, &mut outputs);
     Ok(outputs)
+}
+
+/// Carry stream metadata (timestamp, frame number, colour space) from a
+/// node's inputs to its outputs, so stages pass it through without having to
+/// know it exists.
+///
+/// An output that set any metadata of its own keeps it. Only a freshly made,
+/// uniquely owned output is touched: a value a node republishes through
+/// [`Outputs::set_shared`] may be cached by that node or seen elsewhere, so it
+/// is never mutated (or copied just to stamp it). Values transformed by
+/// [`Node::eval_in_place`] are handled the same way in [`eval_member`].
+fn inherit_meta(inputs: &Inputs, outputs: &mut Outputs) {
+    let Some(lead) = inputs.lead_meta() else {
+        return;
+    };
+    for value in outputs.values_mut() {
+        if let Some(payload) = Arc::get_mut(value)
+            && let Some(meta) = payload.meta_mut()
+            && meta.is_unset()
+        {
+            *meta = lead;
+        }
+    }
 }
 
 /// How a non-head member of a fused run is fed. See [`Runtime::member_wiring`].
@@ -1335,12 +1361,11 @@ struct MemberWiring {
 /// (`carried`), in place of its incoming edge buffers.
 ///
 /// Inputs follow [`Runtime::gather`]'s precedence (external values first,
-/// edges override), but each payload is moved out of its `Arc` when this is
-/// the only reference rather than always cloned. For a 1-in/1-out node fed by a
-/// single link this lets [`Node::eval_in_place`] transform the previous
-/// member's buffer directly. A shared value — a producer that caches its output
-/// via [`Outputs::set_shared`], or one output fanned into two ports — is cloned
-/// first, exactly as `gather` would.
+/// edges override) and, like `gather`, are presented as shared handles without
+/// copying. In addition, a 1-in/1-out node fed by a single link whose value it
+/// alone now owns is offered that value to transform in place via
+/// [`Node::eval_in_place`] — the previous member's buffer, reused outright. A
+/// shared value is never mutated; it goes to [`Node::eval`] instead.
 fn eval_member(
     node: &mut Box<dyn Node>,
     wiring: &MemberWiring,
@@ -1356,34 +1381,42 @@ fn eval_member(
     // is recognised as uniquely owned below.
     drop(carried);
 
-    let mut values: HashMap<PortId, Payload> = shared
-        .into_iter()
-        .map(|(port, value)| {
-            let owned = Arc::try_unwrap(value).unwrap_or_else(|v| v.as_ref().clone());
-            (port, owned)
-        })
-        .collect();
-
+    // In place only when this member is the value's sole owner: then mutating
+    // it copies nothing and nobody else can observe the change. A shared value
+    // (a producer caching its output via `Outputs::set_shared`, or one output
+    // fanned into two ports) goes to `eval`, which reads it without copying.
     if let Some((input, output)) = &wiring.in_place
-        && let Some(mut payload) = values.remove(input)
+        && let Some(value) = shared.remove(input)
     {
-        match node.eval_in_place(&mut payload) {
-            Some(Ok(())) => {
-                let mut outputs = Outputs::new();
-                outputs.set(&output.0, payload);
-                return Ok(outputs);
-            }
-            Some(Err(error)) => return Err(error),
-            // Unsupported: fall through to `eval` with the value restored.
-            None => {
-                values.insert(input.clone(), payload);
+        let lead = value.meta().copied().filter(|m| !m.is_unset());
+        match Arc::try_unwrap(value) {
+            Ok(mut payload) => match node.eval_in_place(&mut payload) {
+                Some(Ok(())) => {
+                    // A stage may rebuild the value outright (crop, cast);
+                    // keep the input's metadata unless it set its own.
+                    if let Some(lead) = lead
+                        && let Some(meta) = payload.meta_mut()
+                        && meta.is_unset()
+                    {
+                        *meta = lead;
+                    }
+                    let mut outputs = Outputs::new();
+                    outputs.set(&output.0, payload);
+                    return Ok(outputs);
+                }
+                Some(Err(error)) => return Err(error),
+                // Unsupported: fall through to `eval` with the value restored.
+                None => {
+                    shared.insert(input.clone(), Arc::new(payload));
+                }
+            },
+            Err(value) => {
+                shared.insert(input.clone(), value);
             }
         }
     }
 
-    let mut outputs = Outputs::new();
-    node.eval(&Inputs::new(values), &mut outputs)?;
-    Ok(outputs)
+    run_eval(node, &Inputs::from_shared(shared))
 }
 
 /// A unit of work in a parallel level: one node, or a whole fused run.

@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::data::{Frame, Payload, PayloadKind};
+use crate::data::{Frame, Meta, Payload, PayloadKind};
 use crate::graph::PortId;
 use crate::traits::Processor;
 
@@ -103,19 +103,54 @@ impl std::error::Error for NodeError {}
 /// A port may be absent (e.g. a feedback edge on the first tick), so lookups
 /// return `Option`; helpers like [`Inputs::frame`] turn "absent" or
 /// "wrong kind" into a [`NodeError`].
+///
+/// Values are held behind `Arc`, the same handle the scheduler stores in edge
+/// buffers, so presenting a producer's output to its consumers is a reference
+/// count bump, not a copy of the frame. A node that only *reads* its inputs —
+/// most stages, which compute a fresh output — therefore never pays for a
+/// copy. One that wants to own and modify a value calls `.clone()` on what it
+/// reads, paying for exactly the copy it needs and no more.
 #[derive(Debug, Default)]
 pub struct Inputs {
-    values: HashMap<PortId, Payload>,
+    values: HashMap<PortId, Arc<Payload>>,
 }
 
 impl Inputs {
+    /// Inputs from owned payloads (wrapped once). Convenient for tests and for
+    /// callers building inputs by hand; the scheduler uses
+    /// [`Inputs::from_shared`].
     pub fn new(values: HashMap<PortId, Payload>) -> Self {
+        Self {
+            values: values.into_iter().map(|(k, v)| (k, Arc::new(v))).collect(),
+        }
+    }
+
+    /// Inputs from already-shared payloads, without copying them.
+    pub fn from_shared(values: HashMap<PortId, Arc<Payload>>) -> Self {
         Self { values }
     }
 
     /// Raw lookup; `None` if the port has no value this evaluation.
     pub fn get(&self, port: &str) -> Option<&Payload> {
-        self.values.get(port)
+        self.values.get(port).map(Arc::as_ref)
+    }
+
+    /// The shared handle for `port`, e.g. to forward it unchanged with
+    /// [`Outputs::set_shared`] (a passthrough that costs nothing) or to compare
+    /// identity with `Arc::ptr_eq`.
+    pub fn get_shared(&self, port: &str) -> Option<Arc<Payload>> {
+        self.values.get(port).cloned()
+    }
+
+    /// The metadata a node's outputs inherit by default: that of the first
+    /// input (by port name) carrying any. Port-name order makes the choice
+    /// deterministic, e.g. `in0` for a merge.
+    pub fn lead_meta(&self) -> Option<Meta> {
+        let mut ports: Vec<&PortId> = self.values.keys().collect();
+        ports.sort_by(|a, b| a.0.cmp(&b.0));
+        ports
+            .into_iter()
+            .find_map(|port| self.values[port].meta().filter(|m| !m.is_unset()).copied())
     }
 
     /// Require a `Frame` on `port`, erroring if absent or the wrong kind.
@@ -181,6 +216,11 @@ impl Outputs {
         self.values.get(port).cloned()
     }
 
+    /// Every published value, mutably (for the scheduler's metadata pass).
+    pub(crate) fn values_mut(&mut self) -> impl Iterator<Item = &mut Arc<Payload>> {
+        self.values.values_mut()
+    }
+
     /// Consume the outputs as a raw port→payload map (used by the scheduler).
     pub fn into_map(self) -> HashMap<PortId, Arc<Payload>> {
         self.values
@@ -234,6 +274,34 @@ pub trait Node: Send {
     fn eval_in_place(&mut self, payload: &mut Payload) -> Option<Result<(), NodeError>> {
         let _ = payload;
         None
+    }
+
+    /// Opt-in GPU implementation of [`Node::eval`] (`gpu` feature).
+    ///
+    /// A node that has one evaluates on `ctx`'s device and returns
+    /// `Some(result)`; the default returns `None`, meaning "CPU only". Same
+    /// ports and same results as `eval`, up to the per-stage tolerance its
+    /// conformance tests allow; output frames should stay on the GPU
+    /// ([`Frame::to_gpu`] / [`Frame::from_gpu`]) so a chain of GPU stages
+    /// never round-trips through main memory.
+    ///
+    /// Inputs may arrive on the CPU or the GPU: read them with
+    /// [`Frame::to_gpu`], which borrows or uploads as needed.
+    #[cfg(feature = "gpu")]
+    fn eval_gpu(
+        &mut self,
+        ctx: &crate::gpu::GpuContext,
+        inputs: &Inputs,
+        outputs: &mut Outputs,
+    ) -> Option<Result<(), NodeError>> {
+        let _ = (ctx, inputs, outputs);
+        None
+    }
+}
+
+impl From<crate::data::TransferError> for NodeError {
+    fn from(e: crate::data::TransferError) -> Self {
+        NodeError::Message(e.to_string())
     }
 }
 
