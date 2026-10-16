@@ -2,6 +2,7 @@
 
 use crate::data::{Frame, FrameData, Payload, PayloadKind};
 use crate::exec::{BuildError, Inputs, Node, NodeError, Outputs, ParamsExt, PortSet, PortSpec};
+use crate::exec::{KindInfo, ParamKind, ParamSpec};
 use crate::graph::Params;
 
 /// 1→k stage. Declares output ports `out0 .. out{k-1}`.
@@ -12,6 +13,35 @@ pub struct SplitStage {
 impl SplitStage {
     pub fn new(channels: u32) -> Self {
         Self { channels }
+    }
+}
+
+impl SplitStage {
+    /// Schema cap on `channels`. `try_from` has no limit, but validation
+    /// builds every node to ask for its ports, and a port is allocated per
+    /// channel, so an absurd count from a serialized graph would exhaust
+    /// memory before any error surfaced. Real frames have a handful.
+    pub const MAX_CHANNELS: u32 = 1024;
+
+    /// Parameter schema for this kind; kept beside `try_from` so the two
+    /// change together (cross-checked in `exec::registry` tests).
+    pub fn info() -> KindInfo {
+        KindInfo::new(
+            "split",
+            "Split a k-channel frame into k single-channel frames on out0..out{k-1}.",
+            vec![
+                // 0 would declare no outputs and fail on every real frame.
+                ParamSpec::required(
+                    "channels",
+                    ParamKind::U32 {
+                        min: Some(1),
+                        max: Some(Self::MAX_CHANNELS),
+                    },
+                    "Channel count k of the input; also the number of outputs.",
+                )
+                .with_default("3"),
+            ],
+        )
     }
 }
 

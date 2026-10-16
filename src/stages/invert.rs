@@ -12,6 +12,7 @@
 #[cfg(feature = "gpu")]
 use crate::data::DType;
 use crate::data::{Frame, FrameData, Payload, PayloadKind};
+use crate::exec::KindInfo;
 use crate::exec::{BuildError, Inputs, Node, NodeError, Outputs, PortSet, PortSpec};
 use crate::graph::Params;
 
@@ -22,6 +23,18 @@ pub struct InvertStage;
 impl InvertStage {
     pub fn new() -> Self {
         Self
+    }
+}
+
+impl InvertStage {
+    /// Parameter schema for this kind; kept beside `try_from` so the two
+    /// change together (cross-checked in `exec::registry` tests).
+    pub fn info() -> KindInfo {
+        KindInfo::new(
+            "invert",
+            "Invert every sample: 255 - v (u8) or 1.0 - v (f32).",
+            vec![],
+        )
     }
 }
 
