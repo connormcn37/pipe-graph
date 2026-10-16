@@ -153,7 +153,10 @@ impl Convergence {
                             .zip(y)
                             .all(|(&p, &q)| p == q || (p - q).abs() <= eps);
                 }
-                // Mismatched dtypes.
+                // Mismatched dtypes, or samples off the CPU (comparing them
+                // would mean downloading): treated as changed, so a loop on
+                // the GPU runs its full iteration count rather than stopping
+                // on a guess.
                 false
             }
             _ => false,
@@ -192,6 +195,10 @@ pub enum Backend {
     /// Like [`Backend::Gpu`], except that a GPU-capable node with no
     /// GPU-capable neighbour stays on the CPU: one kernel is not worth an
     /// upload and a download. Runs of GPU-capable stages move as a group.
+    ///
+    /// Note for feedback loops: [`Convergence`] compares frames on the CPU
+    /// only, so a cycle whose frames are on the GPU never counts as converged
+    /// early and always runs [`Runtime::set_max_iters`] iterations.
     Auto(GpuContext),
 }
 
@@ -876,6 +883,8 @@ impl Runtime {
     }
 
     /// The device `id` runs on, if it is placed on one.
+    // Without the `gpu` feature `GpuContext` is uninhabited (and so `Copy`).
+    #[cfg_attr(not(feature = "gpu"), allow(clippy::clone_on_copy))]
     fn place(&self, id: &NodeId) -> Option<GpuContext> {
         if self.on_gpu.contains(id) {
             self.gpu.clone()
