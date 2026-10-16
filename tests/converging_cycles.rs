@@ -183,6 +183,15 @@ fn never_settling_loop_runs_to_max_iters() {
 }
 
 #[test]
+fn convergence_off_always_runs_max_iters() {
+    let mut rt = self_loop("saturating");
+    rt.set_convergence(Convergence::OFF);
+    rt.run_once().unwrap();
+    assert_eq!(rt.last_iterations_of(&id("k")), Some(DEFAULT_MAX_ITERS));
+    assert_eq!(rt.output(&id("k"), "out").unwrap().as_scalar(), Some(2.0));
+}
+
+#[test]
 fn max_iters_still_caps_a_converging_loop() {
     let mut rt = self_loop("saturating");
     rt.set_max_iters(2);

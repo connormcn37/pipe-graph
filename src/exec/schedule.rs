@@ -69,8 +69,16 @@ pub const DEFAULT_MAX_ITERS: u32 = 16;
 /// The default is exact comparison (both tolerances `0.0`). NaN never equals
 /// anything (unless it is the very same `Arc`), so a loop producing fresh NaNs
 /// runs to `max_iters`.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+///
+/// [`Convergence::OFF`] disables early stopping altogether, restoring "always
+/// run exactly `max_iters`" — for loops whose every iteration matters even
+/// when outputs repeat (a node with evolving internal state, a sink writing
+/// once per iteration).
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Convergence {
+    /// Whether to stop early at all. `false` ignores the tolerances below and
+    /// always runs `max_iters` iterations.
+    pub enabled: bool,
     /// Largest absolute difference at which two `Scalar` payloads still count
     /// as equal.
     pub scalar_eps: f64,
@@ -79,10 +87,25 @@ pub struct Convergence {
     pub frame_eps: f32,
 }
 
+impl Default for Convergence {
+    fn default() -> Self {
+        Self::EXACT
+    }
+}
+
 impl Convergence {
     /// Exact comparison: a loop stops only once it reproduces its outputs
     /// exactly (up to `0.0 == -0.0`). The default.
     pub const EXACT: Self = Self {
+        enabled: true,
+        scalar_eps: 0.0,
+        frame_eps: 0.0,
+    };
+
+    /// No early stopping: every cyclic component runs `max_iters` iterations,
+    /// and no outputs are compared.
+    pub const OFF: Self = Self {
+        enabled: false,
         scalar_eps: 0.0,
         frame_eps: 0.0,
     };
@@ -107,11 +130,15 @@ impl Convergence {
                     return x == y;
                 }
                 if let (Some(x), Some(y)) = (x.as_f32(), y.as_f32()) {
-                    let eps = f64::from(self.frame_eps);
+                    let eps = self.frame_eps;
+                    // Exact mode is a plain slice compare (vectorizes well).
+                    if eps == 0.0 {
+                        return x == y;
+                    }
                     return x.len() == y.len()
                         && x.iter()
                             .zip(y)
-                            .all(|(&p, &q)| within(f64::from(p), f64::from(q), eps));
+                            .all(|(&p, &q)| p == q || (p - q).abs() <= eps);
                 }
                 // Mismatched dtypes.
                 false
@@ -677,7 +704,8 @@ impl Runtime {
     /// How many iterations each component ran the last time it was evaluated,
     /// indexed like [`Plan::components`]. Acyclic components always read `0`.
     /// A cyclic one reads between `2` (converged as early as detectable) and
-    /// `max_iters` (cap reached) — or fewer if `max_iters < 2`, or if an
+    /// `max_iters` (cap reached, or [`Convergence::OFF`]) — or fewer if
+    /// `max_iters < 2`, or if an
     /// iteration failed (then it counts the iterations committed before the
     /// failure). Cleared to `0` by [`Runtime::reset`].
     pub fn last_iterations(&self) -> &[u32] {
@@ -1255,27 +1283,40 @@ impl Runtime {
                 })?;
                 pending.push((id.clone(), outputs));
             }
-            // ...then commit them together (previous-tick feedback semantics),
-            // keeping a handle on each set of outputs to compare against on the
-            // next iteration. The handles are `Arc` clones: no payload is
-            // copied, and the committed `Arc`s are the very same ones.
-            let mut current = Vec::with_capacity(pending.len());
-            for (id, outputs) in pending {
-                let map = outputs.into_map();
-                let mut committed = Outputs::new();
-                for (port, payload) in &map {
-                    committed.set_shared(&port.0, payload.clone());
+            if !self.convergence.enabled {
+                // ...then commit them together (previous-tick feedback
+                // semantics).
+                for (id, outputs) in pending {
+                    self.commit(&id, outputs);
                 }
-                self.commit(&id, committed);
-                current.push(map);
+                self.last_iters[ci] = iter;
+                continue;
             }
-            self.last_iters[ci] = iter;
 
-            let converged = previous.as_ref().is_some_and(|prev| {
+            // Same, but keep a handle on each set of outputs to compare
+            // against the next iteration. The handles are `Arc` clones of
+            // exactly what is committed, so no payload is copied. Comparing
+            // *before* committing means the previous iteration's values are
+            // dropped as soon as the buffers replace them: they never outlive
+            // what the edge buffers would have held anyway.
+            let current: Vec<HashMap<PortId, Arc<Payload>>> = pending
+                .into_iter()
+                .map(|(_, outputs)| outputs.into_map())
+                .collect();
+            // `take` drops the previous outputs right here, before commit.
+            let converged = previous.take().is_some_and(|prev| {
                 prev.iter()
                     .zip(&current)
                     .all(|(a, b)| self.convergence.outputs_equal(a, b))
             });
+            for (id, map) in nodes.iter().zip(&current) {
+                let mut committed = Outputs::new();
+                for (port, payload) in map {
+                    committed.set_shared(&port.0, payload.clone());
+                }
+                self.commit(id, committed);
+            }
+            self.last_iters[ci] = iter;
             if converged {
                 break;
             }
@@ -1945,8 +1986,8 @@ mod tests {
     fn frame_comparison_checks_shape_dtype_and_tolerance() {
         use crate::data::{DType, Frame};
         let loose = Convergence {
-            scalar_eps: 0.0,
             frame_eps: 0.01,
+            ..Convergence::EXACT
         };
         let a = f32_frame(vec![0.0, 1.0]);
         let b = f32_frame(vec![0.005, 1.0]);
