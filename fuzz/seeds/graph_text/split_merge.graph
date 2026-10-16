@@ -1,0 +1,13 @@
+# Split a 3-channel frame into its channels, swap R and B, merge, then crop.
+#
+# Run it with a synthetic 4x4x3 u8 input on src.in:
+#   cargo run --example run_graph -- examples/graphs/split_merge.graph 1 --input src.in=4x4x3:200
+node src clear_channel channel=green
+node split split channels=3
+node merge merge channels=3
+node crop crop x=1 y=1 w=2 h=2
+edge src.out -> split.in
+edge split.out2 -> merge.in0
+edge split.out1 -> merge.in1
+edge split.out0 -> merge.in2
+edge merge.out -> crop.in

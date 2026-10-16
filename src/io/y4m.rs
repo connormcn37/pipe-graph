@@ -30,6 +30,15 @@ const MAX_LINE: u64 = 4096;
 /// Largest width or height we accept from a header (well beyond 8K/16K video).
 const MAX_DIM: u32 = 32768;
 
+/// Most frame-buffer bytes we allocate before any frame data has arrived.
+/// A header alone may legally declare a ~3 GiB `32768x32768 C444` frame;
+/// trusting it would let a 40-byte input (or a hostile ffmpeg pipe) trigger a
+/// multi-gigabyte allocation. Beyond this first chunk the buffer grows by at
+/// most doubling what has actually been received, so memory stays
+/// proportional to input. Real streams only pay those few extra resizes on
+/// their first frame, because the buffer is then reused.
+const FIRST_CHUNK: usize = 1 << 20;
+
 /// Errors from reading or writing a Y4M stream.
 #[derive(Debug)]
 pub enum Y4mError {
@@ -247,11 +256,12 @@ impl<R: Read> Y4mReader<R> {
         let line =
             String::from_utf8(line).map_err(|_| Y4mError::Format("header is not ASCII".into()))?;
         let header = Y4mHeader::parse(&line)?;
-        let planes = vec![0; header.frame_len()];
+        // Allocated lazily by `read_planes`, never sized from the header's
+        // word alone (see `FIRST_CHUNK`).
         Ok(Self {
             inner,
             header,
-            planes,
+            planes: Vec::new(),
             frames_read: 0,
         })
     }
@@ -271,14 +281,32 @@ impl<R: Read> Y4mReader<R> {
         if !(line == b"FRAME" || line.starts_with(b"FRAME ")) {
             return Err(Y4mError::Format("expected a FRAME marker".into()));
         }
-        self.inner.read_exact(&mut self.planes).map_err(|e| {
-            if e.kind() == io::ErrorKind::UnexpectedEof {
-                Y4mError::Format("stream truncated inside frame data".into())
-            } else {
-                Y4mError::Io(e)
+        // Fill the frame in chunks that at most double what has actually been
+        // received (the first chunk is up to `FIRST_CHUNK`), rather than
+        // sizing the buffer from the header alone: a header declaring a huge
+        // frame followed by a few bytes then costs at most `FIRST_CHUNK`, not
+        // gigabytes. (`take(..).read_to_end` would not help: std reserves the
+        // `Take` limit up front.) The buffer is never shrunk, so once the
+        // first frame is in, steady-state reading does not allocate.
+        let want = self.header.frame_len();
+        let mut filled = 0;
+        while filled < want {
+            let next = want.min(filled + filled.max(FIRST_CHUNK));
+            if self.planes.len() < next {
+                self.planes.resize(next, 0);
             }
-        })?;
-        Ok(Some(&self.planes))
+            self.inner
+                .read_exact(&mut self.planes[filled..next])
+                .map_err(|e| {
+                    if e.kind() == io::ErrorKind::UnexpectedEof {
+                        Y4mError::Format("stream truncated inside frame data".into())
+                    } else {
+                        Y4mError::Io(e)
+                    }
+                })?;
+            filled = next;
+        }
+        Ok(Some(&self.planes[..want]))
     }
 
     /// Read the next frame as a 3-channel `u8` RGB [`Frame`] (mono streams are
@@ -642,6 +670,40 @@ mod tests {
         let src = b"YUV4MPEG2 W2 H2 Cmono\nFRAME\n\x10\x10";
         let mut r = Y4mReader::new(&src[..]).unwrap();
         assert!(matches!(r.read_rgb(), Err(Y4mError::Format(_))));
+    }
+
+    #[test]
+    fn huge_declared_frame_does_not_allocate_up_front() {
+        // Regression: the header alone used to size a ~3 GiB frame buffer, so
+        // a few dozen hostile bytes could exhaust memory.
+        let src = b"YUV4MPEG2 W32768 H32768 C444\nFRAME\n\x10\x10";
+        let mut r = Y4mReader::new(&src[..]).unwrap();
+        assert_eq!(r.planes.capacity(), 0);
+        assert!(matches!(r.read_planes(), Err(Y4mError::Format(_))));
+        assert!(r.planes.capacity() <= FIRST_CHUNK);
+    }
+
+    #[test]
+    fn frames_larger_than_the_first_chunk_still_read_correctly() {
+        // 1024x1024 mono = exactly FIRST_CHUNK; 1100 wide needs a second,
+        // chunk. Check the bytes land in order, across consecutive frames.
+        let (w, h) = (1100usize, 1024usize);
+        let mut src = format!("YUV4MPEG2 W{w} H{h} Cmono\n").into_bytes();
+        for f in 0..2u8 {
+            src.extend_from_slice(b"FRAME\n");
+            src.extend((0..w * h).map(|i| (i as u8).wrapping_add(f)));
+        }
+        let mut r = Y4mReader::new(&src[..]).unwrap();
+        for f in 0..2u8 {
+            let p = r.read_planes().unwrap().unwrap();
+            assert_eq!(p.len(), w * h);
+            assert!(
+                p.iter()
+                    .enumerate()
+                    .all(|(i, &b)| b == (i as u8).wrapping_add(f))
+            );
+        }
+        assert!(r.read_planes().unwrap().is_none());
     }
 
     #[test]
