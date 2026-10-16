@@ -54,6 +54,8 @@ Bevy); UI frontends adapt to it. The pieces:
   - `Runtime` / `compile()` — decomposes the graph into strongly-connected
     components (Tarjan), runs acyclic parts in topological order and cyclic
     parts with a bounded tick loop (feedback edges read the previous tick).
+    A loop stops as soon as an iteration reproduces the previous one's outputs
+    (within `Runtime::set_convergence` tolerances), with `max_iters` as a cap.
     The resulting `Plan` keeps the *condensation* (the DAG between components)
     rather than only the flattened order, so later passes can see what is
     independent (`deps`/`successors`) and what is chained one-to-one
@@ -127,8 +129,16 @@ Bevy); UI frontends adapt to it. The pieces:
   line, a parameter inspector for the selected node (Tab/Enter/Esc to pick,
   edit and apply a value, which rebuilds the pipeline live) and the selected
   node's live preview, and feeds it real mouse/keyboard input (Space
-  plays/pauses). Try it with
+  plays/pauses; middle/right-drag pans, the wheel zooms about the cursor, F
+  fits all nodes in view). Try it with
   `cargo run --features bevy --example editor`.
+
+- **GPU (`gpu` feature, wgpu):** a `Frame`'s samples live in a `Storage`
+  — on the CPU, on the GPU (`GpuBuffer`), or in external storage — and move
+  with `to_cpu` / `to_gpu`, which borrow when the samples are already there.
+  A stage may add `Node::eval_gpu` beside `eval`; `invert` has one. GPU
+  tests run on any Vulkan/Metal/DX12 adapter, including Mesa's lavapipe.
+  See [docs/ROADMAP.md](docs/ROADMAP.md) for where this is going.
 
 Realizing the vision above: an `Entity`'s `label` is a `NodeId`; its `inputs` /
 `connect` / `disconnect` are core `Graph` operations; a `Stage`'s `parameters`
@@ -142,5 +152,6 @@ are `NodeSpec.params`; `get_last_frame` / `push_frame` are now
 cargo run                       # runs the processor demo + a split->merge graph
 cargo test                      # headless test suite
 cargo test --features bevy      # also compile/run the Bevy-gated code
+cargo test --features gpu       # GPU paths (skipped if no adapter is found)
 ```
 

@@ -12,6 +12,9 @@ pub use self::node::*;
 mod registry;
 pub use self::registry::*;
 
+mod schema;
+pub use self::schema::*;
+
 mod schedule;
 pub use self::schedule::*;
 

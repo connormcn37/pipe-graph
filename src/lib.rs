@@ -20,6 +20,8 @@ pub mod traits;
 
 pub mod editor;
 pub mod exec;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 pub mod graph;
 pub mod io;
 pub mod stages;

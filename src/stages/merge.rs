@@ -2,6 +2,7 @@
 
 use crate::data::{DType, Frame, FrameData, Payload, PayloadKind};
 use crate::exec::{BuildError, Inputs, Node, NodeError, Outputs, ParamsExt, PortSet, PortSpec};
+use crate::exec::{KindInfo, ParamKind, ParamSpec};
 use crate::graph::Params;
 
 /// k→1 stage. Declares input ports `in0 .. in{k-1}`.
@@ -12,6 +13,35 @@ pub struct MergeStage {
 impl MergeStage {
     pub fn new(channels: u32) -> Self {
         Self { channels }
+    }
+}
+
+impl MergeStage {
+    /// Schema cap on `channels`. `try_from` has no limit, but validation
+    /// builds every node to ask for its ports, and a port is allocated per
+    /// channel, so an absurd count from a serialized graph would exhaust
+    /// memory before any error surfaced. Real frames have a handful.
+    pub const MAX_CHANNELS: u32 = 1024;
+
+    /// Parameter schema for this kind; kept beside `try_from` so the two
+    /// change together (cross-checked in `exec::registry` tests).
+    pub fn info() -> KindInfo {
+        KindInfo::new(
+            "merge",
+            "Interleave k single-channel frames from in0..in{k-1} into one k-channel frame.",
+            vec![
+                // 0 would declare no inputs and fail on every evaluation.
+                ParamSpec::required(
+                    "channels",
+                    ParamKind::U32 {
+                        min: Some(1),
+                        max: Some(Self::MAX_CHANNELS),
+                    },
+                    "Number of single-channel inputs k.",
+                )
+                .with_default("3"),
+            ],
+        )
     }
 }
 

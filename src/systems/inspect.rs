@@ -16,15 +16,18 @@
 //!   it.
 //! - **Otherwise**, with a node selected, Tab highlights its next parameter
 //!   and Enter starts editing the highlighted one, pre-filled with its value.
-//!   Space toggles [`EditorRun::playing`], and Delete/Backspace delete the
+//!   Space toggles [`EditorRun::playing`], Delete/Backspace delete the
 //!   selection (by raising [`EditorPointer::delete_just_pressed`] for
-//!   [`super::handle_pointer`]).
+//!   [`super::handle_pointer`]), and `F` asks the renderer to frame every
+//!   node ([`FitView`]) — so an `f` typed into a value stays text.
 //!
 //! Keys are applied in the order they were pressed, so a fast "Enter, 2,
 //! Enter" within one frame does what it would do across three.
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
+use super::camera::FitView;
 use super::interact::{EditorPointer, EditorSelection, Selection};
 use super::{EditorCommands, EditorRun, GraphResource};
 use crate::editor::EditorCommand;
@@ -84,6 +87,15 @@ pub fn params_of(graph: &Graph, node: &NodeId) -> Vec<(String, String)> {
     params
 }
 
+/// What a shortcut key (pressed outside a value edit) can act on, grouped so
+/// [`route_keys`] stays within a readable parameter count as shortcuts grow.
+#[derive(SystemParam)]
+pub struct Shortcuts<'w> {
+    pointer: ResMut<'w, EditorPointer>,
+    run: ResMut<'w, EditorRun>,
+    fit: ResMut<'w, FitView>,
+}
+
 /// Route this frame's [`EditorKeys`]: to the value being edited, to the
 /// inspector, or to the editor's shortcuts. Runs before pointer handling (so
 /// a Delete it passes on is acted on this frame) and before the core systems
@@ -94,8 +106,7 @@ pub fn route_keys(
     mut keys: ResMut<EditorKeys>,
     mut inspector: ResMut<ParamInspector>,
     mut queue: ResMut<EditorCommands>,
-    mut pointer: ResMut<EditorPointer>,
-    mut run: ResMut<EditorRun>,
+    mut shortcuts: Shortcuts,
 ) {
     let keys = std::mem::take(&mut keys.0);
 
@@ -157,8 +168,11 @@ pub fn route_keys(
             EditKey::Enter if !params.is_empty() => {
                 state.editing = Some(params[state.field].1.clone());
             }
-            EditKey::Char(' ') => run.playing = !run.playing,
-            EditKey::Backspace | EditKey::Delete => pointer.delete_just_pressed = true,
+            EditKey::Char(' ') => shortcuts.run.playing = !shortcuts.run.playing,
+            EditKey::Backspace | EditKey::Delete => {
+                shortcuts.pointer.delete_just_pressed = true;
+            }
+            EditKey::Char('f' | 'F') => shortcuts.fit.requested = true,
             _ => {}
         }
     }
@@ -360,6 +374,32 @@ mod tests {
         assert!(!has_node(&app, "m"));
         app.update();
         assert_eq!(panel(&app), None, "nothing selected, no panel");
+    }
+
+    fn fit_requested(app: &App) -> bool {
+        app.world().resource::<FitView>().requested
+    }
+
+    #[test]
+    fn f_requests_a_fit_only_when_not_editing() {
+        let mut app = app();
+        // With nothing selected, and with a node selected, F is a shortcut.
+        press(&mut app, &[Char('f')]);
+        assert!(fit_requested(&app));
+        app.world_mut().resource_mut::<FitView>().requested = false;
+        select(&mut app, "m");
+        press(&mut app, &[Char('F')]);
+        assert!(fit_requested(&app));
+        app.world_mut().resource_mut::<FitView>().requested = false;
+
+        // While editing, F is text — even pressed in the same frame as the
+        // Enter that started the edit.
+        press(&mut app, &[Enter, Char('f'), Char('F')]);
+        assert!(!fit_requested(&app), "typing f re-framed the view");
+        assert_eq!(inspector(&app).editing.as_deref(), Some("3fF"));
+        // After Esc it is a shortcut again.
+        press(&mut app, &[Escape, Char('f')]);
+        assert!(fit_requested(&app));
     }
 
     #[test]

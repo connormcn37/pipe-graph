@@ -116,7 +116,8 @@ impl fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 impl Graph {
-    /// Serialize to the line-oriented text format (see the [module docs](self)).
+    /// Serialize to the line-oriented text format (one `node` or `edge`
+    /// statement per line; the grammar is documented in `src/graph/text.rs`).
     ///
     /// Output is deterministic: nodes by id, params by key, edges by
     /// [`EdgeId`].
@@ -155,7 +156,8 @@ impl Graph {
         out
     }
 
-    /// Parse the text format (see the [module docs](self)) into a new graph.
+    /// Parse the text format (as written by [`Graph::to_text`]) into a new
+    /// graph.
     ///
     /// Edges are connected in file order and receive fresh [`EdgeId`]s.
     pub fn from_text(text: &str) -> Result<Graph, ParseError> {

@@ -7,6 +7,7 @@
 
 use crate::data::{DType, Frame, FrameData, Payload, PayloadKind};
 use crate::exec::{BuildError, Inputs, Node, NodeError, Outputs, ParamsExt, PortSet, PortSpec};
+use crate::exec::{KindInfo, ParamKind, ParamSpec};
 use crate::graph::Params;
 
 /// 1→1 stage that converts the input frame's dtype.
@@ -18,6 +19,35 @@ pub struct CastStage {
 impl CastStage {
     pub fn new(dtype: DType, scale: Option<f32>) -> Self {
         Self { dtype, scale }
+    }
+}
+
+impl CastStage {
+    /// Parameter schema for this kind; kept beside `try_from` so the two
+    /// change together (cross-checked in `exec::registry` tests).
+    pub fn info() -> KindInfo {
+        KindInfo::new(
+            "cast",
+            "Convert samples between u8 and f32, scaling by `scale`.",
+            vec![
+                ParamSpec::required(
+                    "dtype",
+                    ParamKind::Enum(&["u8", "f32"]),
+                    "Target sample type.",
+                )
+                .with_default("f32"),
+                // No default: absent means "direction-dependent" (1/255 for
+                // u8->f32, 255 for f32->u8), which no single value expresses.
+                ParamSpec::optional(
+                    "scale",
+                    ParamKind::F32 {
+                        min: None,
+                        max: None,
+                    },
+                    "Multiplier applied while converting; defaults to 1/255 (u8->f32) or 255 (f32->u8).",
+                ),
+            ],
+        )
     }
 }
 

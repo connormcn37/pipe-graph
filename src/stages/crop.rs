@@ -2,6 +2,7 @@
 
 use crate::data::{Frame, FrameData, Payload, PayloadKind};
 use crate::exec::{BuildError, Inputs, Node, NodeError, Outputs, ParamsExt, PortSet, PortSpec};
+use crate::exec::{KindInfo, ParamKind, ParamSpec};
 use crate::graph::Params;
 
 /// 1→1 stage that crops the input frame to `[x, x+w) x [y, y+h)`.
@@ -15,6 +16,55 @@ pub struct CropStage {
 impl CropStage {
     pub fn new(x: u32, y: u32, w: u32, h: u32) -> Self {
         Self { x, y, w, h }
+    }
+}
+
+impl CropStage {
+    /// Parameter schema for this kind; kept beside `try_from` so the two
+    /// change together (cross-checked in `exec::registry` tests).
+    pub fn info() -> KindInfo {
+        KindInfo::new(
+            "crop",
+            "Extract the sub-rectangle [x, x+w) x [y, y+h); channels and dtype are kept.",
+            vec![
+                ParamSpec::required(
+                    "x",
+                    ParamKind::U32 {
+                        min: None,
+                        max: None,
+                    },
+                    "Left edge, in pixels.",
+                )
+                .with_default("0"),
+                ParamSpec::required(
+                    "y",
+                    ParamKind::U32 {
+                        min: None,
+                        max: None,
+                    },
+                    "Top edge, in pixels.",
+                )
+                .with_default("0"),
+                // No default size: any guess fails at run time on smaller
+                // frames, so the user has to pick one.
+                ParamSpec::required(
+                    "w",
+                    ParamKind::U32 {
+                        min: Some(1),
+                        max: None,
+                    },
+                    "Width, in pixels (an empty crop is rejected).",
+                ),
+                ParamSpec::required(
+                    "h",
+                    ParamKind::U32 {
+                        min: Some(1),
+                        max: None,
+                    },
+                    "Height, in pixels (an empty crop is rejected).",
+                ),
+            ],
+        )
     }
 }
 

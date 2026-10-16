@@ -11,6 +11,7 @@
 
 use crate::data::{Frame, FrameData, Payload, PayloadKind};
 use crate::exec::{BuildError, Inputs, Node, NodeError, Outputs, ParamsExt, PortSet, PortSpec};
+use crate::exec::{KindInfo, ParamKind, ParamSpec};
 use crate::graph::Params;
 
 /// 1→1 stage that maps each sample to "off" or "on".
@@ -31,6 +32,32 @@ impl ThresholdStage {
             *slot = if v as f32 >= cut { 255 } else { 0 };
         }
         Self { level, lut }
+    }
+}
+
+impl ThresholdStage {
+    /// Parameter schema for this kind; kept beside `try_from` so the two
+    /// change together (cross-checked in `exec::registry` tests).
+    pub fn info() -> KindInfo {
+        KindInfo::new(
+            "threshold",
+            "Binarize every sample against a normalized level (inclusive).",
+            vec![
+                // Normalized, but deliberately not clamped to [0, 1]: f32
+                // frames may carry out-of-range values (e.g. after `gain`),
+                // where a level above 1 is meaningful. (For u8 frames such a
+                // level just yields a constant output.)
+                ParamSpec::required(
+                    "level",
+                    ParamKind::F32 {
+                        min: None,
+                        max: None,
+                    },
+                    "Cut-off in normalized units (typically 0..1); u8 compares against level * 255.",
+                )
+                .with_default("0.5"),
+            ],
+        )
     }
 }
 
