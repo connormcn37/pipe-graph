@@ -21,6 +21,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::data::{DType, FrameData, TransferError};
@@ -44,6 +45,9 @@ pub struct GpuContext {
     queue: wgpu::Queue,
     info: Option<Arc<wgpu::AdapterInfo>>,
     kernels: Arc<Mutex<HashMap<&'static str, Arc<Kernel>>>>,
+    /// Commands recorded but not yet submitted; see [`GpuContext::flush`].
+    pending: Arc<Mutex<Option<wgpu::CommandEncoder>>>,
+    submissions: Arc<AtomicU64>,
 }
 
 impl fmt::Debug for GpuContext {
@@ -89,7 +93,47 @@ impl GpuContext {
             queue,
             info: None,
             kernels: Arc::default(),
+            pending: Arc::default(),
+            submissions: Arc::default(),
         }
+    }
+
+    /// Record GPU work into this context's pending command buffer.
+    ///
+    /// Nothing recorded here runs until [`GpuContext::flush`], which submits
+    /// everything recorded since the last flush as one command buffer. That
+    /// is how a chain of GPU stages becomes a single submission: the runtime
+    /// flushes once per pass, and a download flushes before reading back.
+    /// Clones of a context share the pending buffer.
+    pub fn record<R>(&self, f: impl FnOnce(&mut wgpu::CommandEncoder) -> R) -> R {
+        let mut pending = self.pending.lock().expect("GPU command buffer poisoned");
+        let encoder = pending.get_or_insert_with(|| {
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("pipe-graph batch"),
+                })
+        });
+        f(encoder)
+    }
+
+    /// Submit everything recorded since the last flush (nothing, if nothing
+    /// was recorded). Does not wait for the GPU to finish.
+    pub fn flush(&self) {
+        let encoder = self
+            .pending
+            .lock()
+            .expect("GPU command buffer poisoned")
+            .take();
+        if let Some(encoder) = encoder {
+            self.queue.submit([encoder.finish()]);
+            self.submissions.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// How many command buffers this context (and its clones) has submitted:
+    /// a measure of batching, for tests and diagnostics.
+    pub fn submissions(&self) -> u64 {
+        self.submissions.load(Ordering::Relaxed)
     }
 
     /// The adapter this context opened, when it opened one itself
@@ -197,12 +241,11 @@ impl GpuBuffer {
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let mut encoder = self
-            .ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        encoder.copy_buffer_to_buffer(&self.buffer, 0, &staging, 0, size);
-        self.ctx.queue.submit([encoder.finish()]);
+        // Recorded behind any pending kernels (which may be what produces
+        // this buffer) and submitted with them.
+        self.ctx
+            .record(|encoder| encoder.copy_buffer_to_buffer(&self.buffer, 0, &staging, 0, size));
+        self.ctx.flush();
 
         let (tx, rx) = std::sync::mpsc::channel();
         staging
@@ -301,7 +344,8 @@ impl Kernel {
     }
 
     /// Run over `threads` elements (one invocation each) with `buffers` bound
-    /// in order, and submit. Does not wait for the GPU.
+    /// in order. The dispatch is recorded, not submitted: see
+    /// [`GpuContext::record`].
     pub fn run(&self, ctx: &GpuContext, buffers: &[&wgpu::Buffer], threads: u32) {
         let entries: Vec<_> = buffers
             .iter()
@@ -320,16 +364,12 @@ impl Kernel {
         let x = groups.min(MAX_GROUPS_PER_DIM);
         let y = groups.div_ceil(x);
 
-        let mut encoder = ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        {
+        ctx.record(|encoder| {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(x, y, 1);
-        }
-        ctx.queue.submit([encoder.finish()]);
+        });
     }
 }
 

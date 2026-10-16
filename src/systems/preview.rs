@@ -15,13 +15,16 @@ use crate::data::{Frame, FrameData};
 ///   clamped and rounded (NaN shows as 0).
 ///
 /// Returns `None` for a frame with more than 4 channels or no pixels, which
-/// has no obvious picture.
+/// has no obvious picture, or whose samples could not be downloaded.
 pub fn frame_to_rgba8(frame: &Frame) -> Option<(u32, u32, Vec<u8>)> {
     let channels = frame.channels as usize;
     if !(1..=4).contains(&channels) || frame.width == 0 || frame.height == 0 {
         return None;
     }
-    let samples: Vec<u8> = match frame.data() {
+    // A frame computed on the GPU is downloaded here: previews are the only
+    // place the editor needs its pixels.
+    let data = frame.to_cpu().ok()?;
+    let samples: Vec<u8> = match &*data {
         FrameData::U8(v) => v.clone(),
         FrameData::F32(v) => v
             .iter()

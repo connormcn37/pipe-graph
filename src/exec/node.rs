@@ -10,10 +10,11 @@
 //! Any existing `Processor` becomes a 1-in/1-out `Node` for free via
 //! [`ProcessorNode`], so the working processor stack is reused unchanged.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::data::{Frame, Meta, Payload, PayloadKind};
+use crate::data::{Frame, Location, Meta, Payload, PayloadKind, TransferError};
 use crate::graph::PortId;
 use crate::traits::Processor;
 
@@ -110,7 +111,7 @@ impl std::error::Error for NodeError {}
 /// most stages, which compute a fresh output — therefore never pays for a
 /// copy. One that wants to own and modify a value calls `.clone()` on what it
 /// reads, paying for exactly the copy it needs and no more.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Inputs {
     values: HashMap<PortId, Arc<Payload>>,
 }
@@ -151,6 +152,29 @@ impl Inputs {
         ports
             .into_iter()
             .find_map(|port| self.values[port].meta().filter(|m| !m.is_unset()).copied())
+    }
+
+    /// These inputs with every frame's samples on the CPU: borrowed when they
+    /// already are (the usual case, and free), otherwise with the off-CPU
+    /// frames downloaded. The scheduler applies this before every
+    /// [`Node::eval`], which is why CPU stages can read
+    /// [`Frame::data`] without checking where a frame lives.
+    pub fn on_cpu(&self) -> Result<Cow<'_, Inputs>, TransferError> {
+        let off_cpu = |p: &Payload| p.as_frame().is_some_and(|f| f.location() != Location::Cpu);
+        if !self.values.values().any(|p| off_cpu(p)) {
+            return Ok(Cow::Borrowed(self));
+        }
+        let mut values = HashMap::with_capacity(self.values.len());
+        for (port, value) in &self.values {
+            let value = match &**value {
+                Payload::Frame(f) if off_cpu(value) => {
+                    Arc::new(Payload::Frame(f.clone().into_cpu()?))
+                }
+                _ => value.clone(),
+            };
+            values.insert(port.clone(), value);
+        }
+        Ok(Cow::Owned(Inputs { values }))
     }
 
     /// Require a `Frame` on `port`, erroring if absent or the wrong kind.
@@ -296,6 +320,15 @@ pub trait Node: Send {
     ) -> Option<Result<(), NodeError>> {
         let _ = (ctx, inputs, outputs);
         None
+    }
+
+    /// Whether [`Node::eval_gpu`] is implemented: what the scheduler places
+    /// nodes by (see [`crate::exec::Backend`]). Override together with
+    /// `eval_gpu`. A node that claims support but returns `None` from
+    /// `eval_gpu` still runs, on the CPU, just with a wasted round trip.
+    #[cfg(feature = "gpu")]
+    fn supports_gpu(&self) -> bool {
+        false
     }
 }
 
