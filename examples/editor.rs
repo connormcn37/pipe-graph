@@ -17,7 +17,9 @@
 //! - drag a node's body to move it; drag from an output pin (right side) to an
 //!   input pin (left side) to connect; click a node or an edge and press
 //!   Delete/Backspace to remove it. Every edit rebuilds the pipeline, and
-//!   previews keep updating across the rebuild.
+//!   previews keep updating across the rebuild;
+//! - middle- or right-drag pans the view, the mouse wheel zooms about the
+//!   cursor, and F frames every node (the view is also framed at startup).
 //!
 //! The sample graph is built by queueing ordinary `EditorCommand`s — the same
 //! path the UI uses — so the example also exercises the command pipeline.
@@ -57,9 +59,9 @@ fn main() {
 }
 
 fn spawn_camera(mut commands: Commands) {
-    // Center the view on the sample's auto-layout: three columns (x = 0, 220,
-    // 440) and three rows (y = 0, -120, -240), with room for previews below.
-    commands.spawn((Camera2d, Transform::from_xyz(220.0, -180.0, 0.0)));
+    // No hand-placed position: the render plugin frames the nodes as soon as
+    // they appear (and again on F).
+    commands.spawn(Camera2d);
 }
 
 /// A 160x90 RGB gradient with a checker, fed into the split. The session

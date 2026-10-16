@@ -126,7 +126,8 @@ Bevy); UI frontends adapt to it. The pieces:
   line, a parameter inspector for the selected node (Tab/Enter/Esc to pick,
   edit and apply a value, which rebuilds the pipeline live) and the selected
   node's live preview, and feeds it real mouse/keyboard input (Space
-  plays/pauses). Try it with
+  plays/pauses; middle/right-drag pans, the wheel zooms about the cursor, F
+  fits all nodes in view). Try it with
   `cargo run --features bevy --example editor`.
 
 - **GPU (`gpu` feature, wgpu):** a `Frame`'s samples live in a `Storage`
