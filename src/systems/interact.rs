@@ -29,6 +29,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
+use super::camera::FitView;
 use super::inspect::{EditorKeys, ParamInspector, route_keys};
 use super::layout::{
     EDGE_HIT_DISTANCE, PinSide, distance_to_segment, pin_at, point_in_rect, port_anchor,
@@ -107,6 +108,7 @@ impl Plugin for PipeGraphInteractPlugin {
             .init_resource::<EditorDrag>()
             .init_resource::<EditorKeys>()
             .init_resource::<ParamInspector>()
+            .init_resource::<FitView>()
             .add_systems(
                 Update,
                 (route_keys, handle_pointer)
