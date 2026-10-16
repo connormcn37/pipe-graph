@@ -1,7 +1,7 @@
 //! Editor controller logic — Bevy-free and unit-testable.
 //!
 //! This layer sits between the authoritative [`crate::graph::Graph`] and any UI
-//! frontend (the Bevy layer in [`crate::systems`], or a test). It expresses the
+//! frontend (the Bevy layer in `crate::systems`, or a test). It expresses the
 //! things an editor needs, without depending on any UI toolkit:
 //!
 //! - **Commands** ([`EditorCommand`] / [`apply_command`]): user intents that

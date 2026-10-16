@@ -45,6 +45,7 @@ use crate::data::{Payload, PayloadKind};
 use crate::exec::{
     BuildError, Inputs, Node, NodeError, Outputs, ParamsExt, PortSet, PortSpec, Registry,
 };
+use crate::exec::{KindInfo, ParamKind, ParamSpec};
 use crate::graph::Params;
 
 pub use self::ffmpeg::{FfmpegSink, FfmpegSource, ffmpeg_available};
@@ -53,16 +54,16 @@ pub use self::y4m::{Chroma, Y4mError, Y4mHeader, Y4mReader, Y4mWriter};
 /// Register the video I/O node kinds (called by
 /// [`crate::exec::builtin_registry`]).
 pub fn register_io(reg: &mut Registry) {
-    reg.register("y4m_source", |p| {
+    reg.register_kind(Y4mSource::info(), |p| {
         Ok(Box::new(Y4mSource::try_from(p)?) as Box<dyn Node>)
     });
-    reg.register("y4m_sink", |p| {
+    reg.register_kind(Y4mSink::info(), |p| {
         Ok(Box::new(Y4mSink::try_from(p)?) as Box<dyn Node>)
     });
-    reg.register("ffmpeg_source", |p| {
+    reg.register_kind(FfmpegSource::info(), |p| {
         Ok(Box::new(FfmpegSource::try_from(p)?) as Box<dyn Node>)
     });
-    reg.register("ffmpeg_sink", |p| {
+    reg.register_kind(FfmpegSink::info(), |p| {
         Ok(Box::new(FfmpegSink::try_from(p)?) as Box<dyn Node>)
     });
 }
@@ -128,6 +129,22 @@ impl Y4mSource {
 
     fn fail(&self, e: impl std::fmt::Display) -> NodeError {
         NodeError::Message(format!("y4m_source '{}': {e}", self.path.display()))
+    }
+}
+
+impl Y4mSource {
+    /// Parameter schema for this kind; kept beside `try_from` so the two
+    /// change together (cross-checked in `exec::registry` tests).
+    pub fn info() -> KindInfo {
+        KindInfo::new(
+            "y4m_source",
+            "Read RGB u8 frames from a .y4m file; ends the stream at EOF.",
+            vec![ParamSpec::required(
+                "path",
+                ParamKind::Path,
+                "Input .y4m file (must exist).",
+            )],
+        )
     }
 }
 
@@ -213,6 +230,36 @@ impl Y4mSink {
 
     fn fail(&self, e: impl std::fmt::Display) -> NodeError {
         NodeError::Message(format!("y4m_sink '{}': {e}", self.path.display()))
+    }
+}
+
+impl Y4mSink {
+    /// Parameter schema for this kind; kept beside `try_from` so the two
+    /// change together (cross-checked in `exec::registry` tests).
+    pub fn info() -> KindInfo {
+        KindInfo::new(
+            "y4m_sink",
+            "Write 1- or 3-channel u8 frames to a .y4m file; size comes from the first frame.",
+            vec![
+                ParamSpec::required(
+                    "path",
+                    ParamKind::Path,
+                    "Output .y4m file (created or truncated).",
+                ),
+                ParamSpec::optional(
+                    "fps",
+                    ParamKind::FrameRate,
+                    "Frame rate written to the header.",
+                )
+                .with_default("25"),
+                // No default: absent picks mono for 1-channel frames, else 420.
+                ParamSpec::optional(
+                    "chroma",
+                    ParamKind::Enum(&["420", "444", "mono"]),
+                    "Chroma subsampling; default mono for 1-channel input, else 420.",
+                ),
+            ],
+        )
     }
 }
 

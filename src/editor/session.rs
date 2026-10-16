@@ -12,7 +12,9 @@
 //!   receiving values — a preview panel does not need to know a rebuild
 //!   happened.
 //! - **Watches** from [`LiveSession::watch`] are re-applied.
-//! - The iteration bound from [`LiveSession::set_max_iters`] is re-applied.
+//! - The iteration bound from [`LiveSession::set_max_iters`] and the
+//!   convergence tolerance from [`LiveSession::set_convergence`] are
+//!   re-applied.
 //!
 //! Taps and watches are keyed by `(node, port)` and re-attached only where that
 //! port still exists. A binding whose port disappeared (e.g. a parameter
@@ -49,7 +51,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::data::Payload;
 use crate::editor::{CommandOutcome, EditorCommand, Layout, apply_command_with_layout};
-use crate::exec::{Registry, RunError, Runtime, ScheduleError, Tap};
+use crate::exec::{Convergence, Registry, RunError, Runtime, ScheduleError, Tap};
 use crate::graph::{Graph, GraphDocument, NodeId, PortId};
 
 /// Why a [`LiveSession`] is not producing output.
@@ -96,6 +98,7 @@ pub struct LiveSession {
     taps: Vec<TapBinding>,
     watched: HashSet<(NodeId, PortId)>,
     max_iters: Option<u32>,
+    convergence: Option<Convergence>,
 }
 
 impl LiveSession {
@@ -162,6 +165,7 @@ impl LiveSession {
             taps: Vec::new(),
             watched: HashSet::new(),
             max_iters: None,
+            convergence: None,
         };
         session.rebuild();
         session
@@ -359,6 +363,15 @@ impl LiveSession {
         }
     }
 
+    /// Convergence tolerance for cyclic components (see
+    /// [`Runtime::set_convergence`]); survives rebuilds.
+    pub fn set_convergence(&mut self, convergence: Convergence) {
+        self.convergence = Some(convergence);
+        if let Some(rt) = self.runtime.as_mut() {
+            rt.set_convergence(convergence);
+        }
+    }
+
     /// A node's last output on `port` (see [`Runtime::output`]); `None` while
     /// there is no runtime.
     pub fn output(&self, node: &NodeId, port: &str) -> Option<&Payload> {
@@ -414,6 +427,9 @@ impl LiveSession {
             Ok(mut rt) => {
                 if let Some(n) = self.max_iters {
                     rt.set_max_iters(n);
+                }
+                if let Some(c) = self.convergence {
+                    rt.set_convergence(c);
                 }
                 for (node, ports) in &self.inputs {
                     for (port, payload) in ports {
@@ -556,6 +572,20 @@ mod tests {
         assert!(s.output(&id("a"), "out").is_none());
         s.run_once().unwrap();
         assert_eq!(rgb(&s, "a"), vec![(255, 255, 0)]);
+    }
+
+    #[test]
+    fn iteration_settings_survive_rebuilds() {
+        let mut s = LiveSession::new(builtin_registry());
+        s.set_max_iters(7);
+        s.set_convergence(Convergence::OFF);
+        s.apply(EditorCommand::AddNode(node(
+            "a",
+            "clear_channel",
+            &[("channel", "red")],
+        )));
+        let rt = s.runtime().expect("rebuilt");
+        assert_eq!(rt.convergence(), Convergence::OFF);
     }
 
     #[test]
