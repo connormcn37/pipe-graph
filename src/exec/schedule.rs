@@ -13,7 +13,9 @@
 //! outputs to the buffers of outgoing edges. Cyclic components use a
 //! Jacobi-style update — every node in the component is evaluated against the
 //! previous iteration's buffers, then all results are committed together — so a
-//! feedback edge naturally reads the previous tick's value.
+//! feedback edge naturally reads the previous tick's value. A cyclic component
+//! iterates until its outputs stop changing (see [`Convergence`]) or
+//! [`Runtime::set_max_iters`] is reached, whichever comes first.
 //!
 //! Execution is serial by default. [`ExecMode::Parallel`] instead walks the
 //! condensation level by level ([`Plan::levels`]) and evaluates the acyclic
@@ -32,6 +34,110 @@ use crate::graph::{EdgeId, Graph, NodeId, PortId};
 
 /// Default bound on iterations for a cyclic component within one `run_once`.
 pub const DEFAULT_MAX_ITERS: u32 = 16;
+
+/// When a cyclic component counts as *converged*, i.e. when one more Jacobi
+/// iteration would change nothing and can be skipped.
+///
+/// After every iteration but the first, each member node's outputs (all of its
+/// output ports) are compared with what it produced on the previous iteration
+/// of the same `run_once`. The component stops early once every port carries
+/// a payload equal to the previous one under these rules:
+///
+/// - the same `Arc` (pointer-equal) is always equal — the fast path for nodes
+///   that republish a cached buffer via [`Outputs::set_shared`];
+/// - `Scalar`s are equal when they differ by at most `scalar_eps`;
+/// - `Frame`s need the same shape and dtype; `u8` data must match exactly,
+///   `f32` data element-wise within `frame_eps`;
+/// - `Bytes` must match exactly;
+/// - different kinds, or a port present on one iteration and absent on the
+///   other, are never equal.
+///
+/// Why "outputs equal ⇒ fixed point": a member's inputs on the next iteration
+/// are exactly the outputs just committed (plus inputs from outside the
+/// component, which do not change while it iterates). If those match the
+/// previous iteration's, the next iteration would see the same inputs as this
+/// one did and — for a node whose result depends only on its inputs — produce
+/// the same outputs again. A node with internal state that evolves while its
+/// outputs stay put is judged on its outputs only; pin such a loop with
+/// [`Runtime::set_max_iters`] if every iteration matters.
+///
+/// The first iteration of a `run_once` has nothing to compare against (values
+/// from the previous `run_once` are deliberately *not* used: an input from
+/// outside the loop may have changed in between), so detecting a fixed point
+/// takes at least two iterations. `max_iters` remains a hard cap either way.
+///
+/// The default is exact comparison (both tolerances `0.0`). NaN never equals
+/// anything (unless it is the very same `Arc`), so a loop producing fresh NaNs
+/// runs to `max_iters`.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Convergence {
+    /// Largest absolute difference at which two `Scalar` payloads still count
+    /// as equal.
+    pub scalar_eps: f64,
+    /// Largest absolute per-element difference at which two `f32` frames still
+    /// count as equal. (`u8` frames always compare exactly.)
+    pub frame_eps: f32,
+}
+
+impl Convergence {
+    /// Exact comparison: a loop stops only once it reproduces its outputs
+    /// exactly (up to `0.0 == -0.0`). The default.
+    pub const EXACT: Self = Self {
+        scalar_eps: 0.0,
+        frame_eps: 0.0,
+    };
+
+    /// Whether `a` and `b` are equal under this tolerance (see the type docs).
+    ///
+    /// Implemented here rather than as `PartialEq` on [`Payload`] because
+    /// equality *within a tolerance* is a scheduling policy, not a property of
+    /// the data type.
+    pub fn payloads_equal(&self, a: &Arc<Payload>, b: &Arc<Payload>) -> bool {
+        if Arc::ptr_eq(a, b) {
+            return true;
+        }
+        match (a.as_ref(), b.as_ref()) {
+            (Payload::Scalar(x), Payload::Scalar(y)) => within(*x, *y, self.scalar_eps),
+            (Payload::Bytes(x), Payload::Bytes(y)) => x == y,
+            (Payload::Frame(x), Payload::Frame(y)) => {
+                if (x.width, x.height, x.channels) != (y.width, y.height, y.channels) {
+                    return false;
+                }
+                if let (Some(x), Some(y)) = (x.as_u8(), y.as_u8()) {
+                    return x == y;
+                }
+                if let (Some(x), Some(y)) = (x.as_f32(), y.as_f32()) {
+                    let eps = f64::from(self.frame_eps);
+                    return x.len() == y.len()
+                        && x.iter()
+                            .zip(y)
+                            .all(|(&p, &q)| within(f64::from(p), f64::from(q), eps));
+                }
+                // Mismatched dtypes.
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether two complete output sets (one node, one iteration each) are
+    /// equal: the same ports, each with equal payloads.
+    fn outputs_equal(
+        &self,
+        a: &HashMap<PortId, Arc<Payload>>,
+        b: &HashMap<PortId, Arc<Payload>>,
+    ) -> bool {
+        a.len() == b.len()
+            && a.iter()
+                .all(|(port, x)| b.get(port).is_some_and(|y| self.payloads_equal(x, y)))
+    }
+}
+
+/// `|a - b| <= eps`, with exact equality checked first so equal infinities
+/// match; NaN matches nothing.
+fn within(a: f64, b: f64, eps: f64) -> bool {
+    a == b || (a - b).abs() <= eps
+}
 
 /// How [`Runtime::run_once`] evaluates the plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -445,6 +551,13 @@ pub struct Runtime {
     /// node, so this is computed once rather than calling `ports()` per eval.
     single_io: HashMap<NodeId, (PortId, PortId)>,
     max_iters: u32,
+    /// When a cyclic component may stop before `max_iters`; see
+    /// [`Runtime::set_convergence`].
+    convergence: Convergence,
+    /// Iterations each component ran on its most recent evaluation, indexed
+    /// like [`Plan::components`] (acyclic components stay `0`); see
+    /// [`Runtime::last_iterations`].
+    last_iters: Vec<u32>,
     /// Serial or level-parallel evaluation; see [`Runtime::set_exec_mode`].
     exec_mode: ExecMode,
     /// [`Plan::levels`], cached: the plan never changes for this runtime.
@@ -510,6 +623,7 @@ impl Runtime {
             })
             .collect();
         let levels = plan.levels();
+        let last_iters = vec![0; plan.components.len()];
 
         let mut runtime = Self {
             plan,
@@ -528,6 +642,8 @@ impl Runtime {
             fusion: true,
             single_io,
             max_iters: DEFAULT_MAX_ITERS,
+            convergence: Convergence::default(),
+            last_iters,
             exec_mode: ExecMode::Serial,
             levels,
         };
@@ -539,9 +655,41 @@ impl Runtime {
         &self.plan
     }
 
-    /// Bound on iterations per cyclic component within one `run_once`.
+    /// Hard bound on iterations per cyclic component within one `run_once`
+    /// (default [`DEFAULT_MAX_ITERS`]). A component that converges (see
+    /// [`Convergence`]) stops sooner; one that never settles — a counter, an
+    /// oscillator — always runs exactly this many.
     pub fn set_max_iters(&mut self, n: u32) {
         self.max_iters = n;
+    }
+
+    /// Set the tolerance under which a cyclic component counts as converged
+    /// and stops iterating early (default: [`Convergence::EXACT`]).
+    pub fn set_convergence(&mut self, convergence: Convergence) {
+        self.convergence = convergence;
+    }
+
+    /// The current convergence tolerance.
+    pub fn convergence(&self) -> Convergence {
+        self.convergence
+    }
+
+    /// How many iterations each component ran the last time it was evaluated,
+    /// indexed like [`Plan::components`]. Acyclic components always read `0`.
+    /// A cyclic one reads between `2` (converged as early as detectable) and
+    /// `max_iters` (cap reached) — or fewer if `max_iters < 2`, or if an
+    /// iteration failed (then it counts the iterations committed before the
+    /// failure). Cleared to `0` by [`Runtime::reset`].
+    pub fn last_iterations(&self) -> &[u32] {
+        &self.last_iters
+    }
+
+    /// [`Runtime::last_iterations`] for the component containing `node`;
+    /// `None` for an unknown node.
+    pub fn last_iterations_of(&self, node: &NodeId) -> Option<u32> {
+        self.plan
+            .component_of(node)
+            .map(|component| self.last_iters[component])
     }
 
     /// Turn fused execution of [`Runtime::fusable_runs`] on or off (default:
@@ -837,6 +985,7 @@ impl Runtime {
             e.buffer.clear();
         }
         self.node_outputs.clear();
+        self.last_iters.fill(0);
         for ports in self.taps.values() {
             for taps in ports.values() {
                 for tap in taps {
@@ -867,7 +1016,7 @@ impl Runtime {
             }
             match self.plan.components[ci].clone() {
                 Component::Acyclic(id) => self.eval_node(&id)?,
-                Component::Cyclic { nodes } => self.run_cyclic(&nodes)?,
+                Component::Cyclic { nodes } => self.run_cyclic(ci, &nodes)?,
             }
         }
         Ok(())
@@ -949,7 +1098,7 @@ impl Runtime {
                                 self.eval_batch(&batch)?;
                                 batch.clear();
                             }
-                            self.run_cyclic(&nodes)?;
+                            self.run_cyclic(ci, &nodes)?;
                             continue;
                         }
                     },
@@ -1085,8 +1234,15 @@ impl Runtime {
         Ok(())
     }
 
-    fn run_cyclic(&mut self, nodes: &[NodeId]) -> Result<(), RunError> {
-        for _ in 0..self.max_iters {
+    /// Iterate cyclic component `ci` (made of `nodes`) Jacobi-style until it
+    /// converges or `max_iters` iterations have run; see [`Convergence`].
+    /// Records the iteration count in [`Runtime::last_iterations`].
+    fn run_cyclic(&mut self, ci: usize, nodes: &[NodeId]) -> Result<(), RunError> {
+        self.last_iters[ci] = 0;
+        // Each member's outputs from the previous iteration (same order as
+        // `nodes`); `None` until the first iteration has committed.
+        let mut previous: Option<Vec<HashMap<PortId, Arc<Payload>>>> = None;
+        for iter in 1..=self.max_iters {
             // Gather+eval every node against the *current* buffers first...
             let mut pending: Vec<(NodeId, Outputs)> = Vec::with_capacity(nodes.len());
             for id in nodes {
@@ -1099,10 +1255,31 @@ impl Runtime {
                 })?;
                 pending.push((id.clone(), outputs));
             }
-            // ...then commit them together (previous-tick feedback semantics).
+            // ...then commit them together (previous-tick feedback semantics),
+            // keeping a handle on each set of outputs to compare against on the
+            // next iteration. The handles are `Arc` clones: no payload is
+            // copied, and the committed `Arc`s are the very same ones.
+            let mut current = Vec::with_capacity(pending.len());
             for (id, outputs) in pending {
-                self.commit(&id, outputs);
+                let map = outputs.into_map();
+                let mut committed = Outputs::new();
+                for (port, payload) in &map {
+                    committed.set_shared(&port.0, payload.clone());
+                }
+                self.commit(&id, committed);
+                current.push(map);
             }
+            self.last_iters[ci] = iter;
+
+            let converged = previous.as_ref().is_some_and(|prev| {
+                prev.iter()
+                    .zip(&current)
+                    .all(|(a, b)| self.convergence.outputs_equal(a, b))
+            });
+            if converged {
+                break;
+            }
+            previous = Some(current);
         }
         Ok(())
     }
@@ -1720,5 +1897,83 @@ mod tests {
         seen.sort_unstable();
         seen.dedup();
         assert_eq!(seen.len(), total);
+    }
+
+    fn arc(p: Payload) -> Arc<Payload> {
+        Arc::new(p)
+    }
+
+    fn f32_frame(values: Vec<f32>) -> Arc<Payload> {
+        use crate::data::{Frame, FrameData};
+        let w = values.len() as u32;
+        arc(Payload::Frame(Frame::from_data(
+            w,
+            1,
+            1,
+            FrameData::F32(values),
+        )))
+    }
+
+    #[test]
+    fn exact_convergence_compares_values_not_pointers() {
+        let c = Convergence::EXACT;
+        assert!(c.payloads_equal(&arc(Payload::Scalar(1.5)), &arc(Payload::Scalar(1.5))));
+        assert!(!c.payloads_equal(&arc(Payload::Scalar(1.5)), &arc(Payload::Scalar(1.6))));
+        assert!(!c.payloads_equal(
+            &arc(Payload::Scalar(f64::NAN)),
+            &arc(Payload::Scalar(f64::NAN))
+        ));
+        // The same Arc is equal even when its value (NaN) is not.
+        let nan = arc(Payload::Scalar(f64::NAN));
+        assert!(c.payloads_equal(&nan, &nan));
+        assert!(c.payloads_equal(
+            &arc(Payload::Bytes(Arc::from(&b"ab"[..]))),
+            &arc(Payload::Bytes(Arc::from(&b"ab"[..])))
+        ));
+        assert!(!c.payloads_equal(
+            &arc(Payload::Bytes(Arc::from(&b"ab"[..]))),
+            &arc(Payload::Bytes(Arc::from(&b"ac"[..])))
+        ));
+        // Kinds never compare equal across variants.
+        assert!(!c.payloads_equal(
+            &arc(Payload::Scalar(0.0)),
+            &arc(Payload::Bytes(Arc::from(&b""[..])))
+        ));
+    }
+
+    #[test]
+    fn frame_comparison_checks_shape_dtype_and_tolerance() {
+        use crate::data::{DType, Frame};
+        let loose = Convergence {
+            scalar_eps: 0.0,
+            frame_eps: 0.01,
+        };
+        let a = f32_frame(vec![0.0, 1.0]);
+        let b = f32_frame(vec![0.005, 1.0]);
+        assert!(!Convergence::EXACT.payloads_equal(&a, &b));
+        assert!(loose.payloads_equal(&a, &b));
+        assert!(!loose.payloads_equal(&a, &f32_frame(vec![0.02, 1.0])));
+        // Different shape.
+        assert!(!loose.payloads_equal(&a, &f32_frame(vec![0.0, 1.0, 0.0])));
+        // Same shape, different dtype.
+        let u8_frame = arc(Payload::Frame(Frame::zeros(2, 1, 1, DType::U8)));
+        let f32_zeros = arc(Payload::Frame(Frame::zeros(2, 1, 1, DType::F32)));
+        assert!(!loose.payloads_equal(&u8_frame, &f32_zeros));
+        // u8 frames compare exactly regardless of frame_eps.
+        let rgb = |v| arc(Payload::Frame(Frame::from_rgb8(1, 1, vec![(v, 0, 0)])));
+        assert!(loose.payloads_equal(&rgb(7), &rgb(7)));
+        assert!(!loose.payloads_equal(&rgb(7), &rgb(8)));
+    }
+
+    #[test]
+    fn output_sets_must_have_the_same_ports() {
+        let c = Convergence::EXACT;
+        let one: HashMap<PortId, Arc<Payload>> =
+            [(PortId("a".into()), arc(Payload::Scalar(1.0)))].into();
+        let mut two = one.clone();
+        two.insert(PortId("b".into()), arc(Payload::Scalar(1.0)));
+        assert!(c.outputs_equal(&one, &one.clone()));
+        assert!(!c.outputs_equal(&one, &two));
+        assert!(!c.outputs_equal(&two, &one));
     }
 }

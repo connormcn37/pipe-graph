@@ -54,6 +54,8 @@ Bevy); UI frontends adapt to it. The pieces:
   - `Runtime` / `compile()` — decomposes the graph into strongly-connected
     components (Tarjan), runs acyclic parts in topological order and cyclic
     parts with a bounded tick loop (feedback edges read the previous tick).
+    A loop stops as soon as an iteration reproduces the previous one's outputs
+    (within `Runtime::set_convergence` tolerances), with `max_iters` as a cap.
     The resulting `Plan` keeps the *condensation* (the DAG between components)
     rather than only the flattened order, so later passes can see what is
     independent (`deps`/`successors`) and what is chained one-to-one
