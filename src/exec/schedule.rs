@@ -1240,22 +1240,24 @@ impl Runtime {
         }
     }
 
+    /// The inputs `id` sees this evaluation: external values first, then edge
+    /// values (which win where both exist). Every value is a shared handle to
+    /// what the producer published, so this copies no frames — see [`Inputs`].
     fn gather(&self, id: &NodeId) -> Inputs {
-        let mut values: HashMap<PortId, Payload> = HashMap::new();
-        // External inputs first; edge values override where both exist.
+        let mut values: HashMap<PortId, Arc<Payload>> = HashMap::new();
         if let Some(ext) = self.external.get(id) {
             for (port, value) in ext {
-                values.insert(port.clone(), value.as_ref().clone());
+                values.insert(port.clone(), value.clone());
             }
         }
         if let Some(edge_ids) = self.incoming.get(id) {
             for &i in edge_ids {
-                if let Some(payload) = self.edges[i].buffer.get_last() {
-                    values.insert(self.edges[i].to.1.clone(), payload.clone());
+                if let Some(payload) = self.edges[i].buffer.get_last_arc() {
+                    values.insert(self.edges[i].to.1.clone(), payload);
                 }
             }
         }
-        Inputs::new(values)
+        Inputs::from_shared(values)
     }
 
     fn commit(&mut self, id: &NodeId, outputs: Outputs) {
@@ -1335,12 +1337,11 @@ struct MemberWiring {
 /// (`carried`), in place of its incoming edge buffers.
 ///
 /// Inputs follow [`Runtime::gather`]'s precedence (external values first,
-/// edges override), but each payload is moved out of its `Arc` when this is
-/// the only reference rather than always cloned. For a 1-in/1-out node fed by a
-/// single link this lets [`Node::eval_in_place`] transform the previous
-/// member's buffer directly. A shared value — a producer that caches its output
-/// via [`Outputs::set_shared`], or one output fanned into two ports — is cloned
-/// first, exactly as `gather` would.
+/// edges override) and, like `gather`, are presented as shared handles without
+/// copying. In addition, a 1-in/1-out node fed by a single link whose value it
+/// alone now owns is offered that value to transform in place via
+/// [`Node::eval_in_place`] — the previous member's buffer, reused outright. A
+/// shared value is never mutated; it goes to [`Node::eval`] instead.
 fn eval_member(
     node: &mut Box<dyn Node>,
     wiring: &MemberWiring,
@@ -1356,33 +1357,34 @@ fn eval_member(
     // is recognised as uniquely owned below.
     drop(carried);
 
-    let mut values: HashMap<PortId, Payload> = shared
-        .into_iter()
-        .map(|(port, value)| {
-            let owned = Arc::try_unwrap(value).unwrap_or_else(|v| v.as_ref().clone());
-            (port, owned)
-        })
-        .collect();
-
+    // In place only when this member is the value's sole owner: then mutating
+    // it copies nothing and nobody else can observe the change. A shared value
+    // (a producer caching its output via `Outputs::set_shared`, or one output
+    // fanned into two ports) goes to `eval`, which reads it without copying.
     if let Some((input, output)) = &wiring.in_place
-        && let Some(mut payload) = values.remove(input)
+        && let Some(value) = shared.remove(input)
     {
-        match node.eval_in_place(&mut payload) {
-            Some(Ok(())) => {
-                let mut outputs = Outputs::new();
-                outputs.set(&output.0, payload);
-                return Ok(outputs);
-            }
-            Some(Err(error)) => return Err(error),
-            // Unsupported: fall through to `eval` with the value restored.
-            None => {
-                values.insert(input.clone(), payload);
+        match Arc::try_unwrap(value) {
+            Ok(mut payload) => match node.eval_in_place(&mut payload) {
+                Some(Ok(())) => {
+                    let mut outputs = Outputs::new();
+                    outputs.set(&output.0, payload);
+                    return Ok(outputs);
+                }
+                Some(Err(error)) => return Err(error),
+                // Unsupported: fall through to `eval` with the value restored.
+                None => {
+                    shared.insert(input.clone(), Arc::new(payload));
+                }
+            },
+            Err(value) => {
+                shared.insert(input.clone(), value);
             }
         }
     }
 
     let mut outputs = Outputs::new();
-    node.eval(&Inputs::new(values), &mut outputs)?;
+    node.eval(&Inputs::from_shared(shared), &mut outputs)?;
     Ok(outputs)
 }
 

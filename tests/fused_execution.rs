@@ -421,9 +421,10 @@ fn clone_probe_shows_in_place_reuse_along_a_fused_run() {
 }
 
 #[test]
-fn a_shared_payload_is_copied_before_in_place_mutation() {
+fn a_shared_payload_is_never_mutated_in_place() {
     // The head republishes one cached Arc; mutating it in place would corrupt
-    // the cache and change every later run's result.
+    // the cache and change every later run's result. A shared value therefore
+    // goes to `eval`, which reads it without the runtime copying it first.
     let g = probe_chain("sticky");
     let log = Log::default();
     let mut rt = Runtime::instantiate(&g, &registry(&log)).unwrap();
@@ -441,8 +442,8 @@ fn a_shared_payload_is_copied_before_in_place_mutation() {
     let cached = entries[0].2;
     for chunk in entries.chunks(3) {
         assert_eq!(chunk[0].2, cached, "sticky keeps its buffer");
-        assert_eq!(chunk[1].1, Via::InPlace);
-        assert_ne!(chunk[1].2, cached, "p2 worked on a copy");
+        assert_eq!(chunk[1].1, Via::Eval, "p2 may not mutate a shared value");
+        assert_ne!(chunk[1].2, cached, "p2 produced its own buffer");
         assert_eq!(chunk[2].2, chunk[1].2, "p3 reused p2's buffer");
     }
 }
