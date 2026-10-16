@@ -127,6 +127,13 @@ Bevy); UI frontends adapt to it. The pieces:
   plays/pauses). Try it with
   `cargo run --features bevy --example editor`.
 
+- **GPU (`gpu` feature, wgpu):** a `Frame`'s samples live in a `Storage`
+  — on the CPU, on the GPU (`GpuBuffer`), or in external storage — and move
+  with `to_cpu` / `to_gpu`, which borrow when the samples are already there.
+  A stage may add `Node::eval_gpu` beside `eval`; `invert` has one. GPU
+  tests run on any Vulkan/Metal/DX12 adapter, including Mesa's lavapipe.
+  See [docs/ROADMAP.md](docs/ROADMAP.md) for where this is going.
+
 Realizing the vision above: an `Entity`'s `label` is a `NodeId`; its `inputs` /
 `connect` / `disconnect` are core `Graph` operations; a `Stage`'s `parameters`
 are `NodeSpec.params`; `get_last_frame` / `push_frame` are now
@@ -139,5 +146,6 @@ are `NodeSpec.params`; `get_last_frame` / `push_frame` are now
 cargo run                       # runs the processor demo + a split->merge graph
 cargo test                      # headless test suite
 cargo test --features bevy      # also compile/run the Bevy-gated code
+cargo test --features gpu       # GPU paths (skipped if no adapter is found)
 ```
 

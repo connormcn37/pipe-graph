@@ -275,6 +275,34 @@ pub trait Node: Send {
         let _ = payload;
         None
     }
+
+    /// Opt-in GPU implementation of [`Node::eval`] (`gpu` feature).
+    ///
+    /// A node that has one evaluates on `ctx`'s device and returns
+    /// `Some(result)`; the default returns `None`, meaning "CPU only". Same
+    /// ports and same results as `eval`, up to the per-stage tolerance its
+    /// conformance tests allow; output frames should stay on the GPU
+    /// ([`Frame::to_gpu`] / [`Frame::from_gpu`]) so a chain of GPU stages
+    /// never round-trips through main memory.
+    ///
+    /// Inputs may arrive on the CPU or the GPU: read them with
+    /// [`Frame::to_gpu`], which borrows or uploads as needed.
+    #[cfg(feature = "gpu")]
+    fn eval_gpu(
+        &mut self,
+        ctx: &crate::gpu::GpuContext,
+        inputs: &Inputs,
+        outputs: &mut Outputs,
+    ) -> Option<Result<(), NodeError>> {
+        let _ = (ctx, inputs, outputs);
+        None
+    }
+}
+
+impl From<crate::data::TransferError> for NodeError {
+    fn from(e: crate::data::TransferError) -> Self {
+        NodeError::Message(e.to_string())
+    }
 }
 
 /// Adapts any single-in/single-out [`Processor`] into a [`Node`] with ports

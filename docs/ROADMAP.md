@@ -51,6 +51,14 @@ trait-object variant for storage we don't. A trait-only design would push
 stages into runtime downcasts to reach the bytes or buffer they actually work
 on.
 
+**Status (H1):** `Storage`, `Location`, `ExternalStorage`, `to_cpu` /
+`to_gpu` / `into_cpu` / `into_gpu`, `GpuContext` (own or borrowed device),
+`GpuBuffer` (u8 packed four per word), cached WGSL `Kernel`s, and
+`Node::eval_gpu` exist; `invert` is the first stage with a GPU path. The
+scheduler does not call `eval_gpu` yet (H2), so until then nothing hands a
+CPU stage a GPU frame, which is what lets the CPU accessors (`data()`,
+`as_u8()`, …) stay as they were.
+
 **Two implementations per stage.** `Node::eval` is the CPU path; an optional
 `Node::eval_gpu` is the GPU path. Stages without one run on the CPU.
 
