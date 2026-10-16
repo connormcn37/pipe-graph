@@ -52,7 +52,7 @@ use std::collections::{HashMap, HashSet};
 use crate::data::Payload;
 use crate::editor::{CommandOutcome, EditorCommand, Layout, apply_command_with_layout};
 use crate::exec::{Convergence, Registry, RunError, Runtime, ScheduleError, Tap};
-use crate::graph::{Graph, NodeId, PortId};
+use crate::graph::{Graph, GraphDocument, NodeId, PortId};
 
 /// Why a [`LiveSession`] is not producing output.
 #[derive(Debug, Clone, PartialEq)]
@@ -111,6 +111,50 @@ impl LiveSession {
     /// graph that does not build is accepted; check [`LiveSession::last_error`].
     pub fn with_graph(graph: Graph, registry: Registry) -> Self {
         let layout = Layout::auto(&graph);
+        Self::with_layout(graph, layout, registry)
+    }
+
+    /// A session restored from a saved [`GraphDocument`] (e.g. a v2 graph
+    /// file): the graph plus its canvas layout.
+    ///
+    /// Saved positions are used as-is. Nodes the document has no position for
+    /// (a v1 file, a hand-written file, or one saved by a tool that does not
+    /// lay out) are auto-placed with [`Layout::place_missing`], which puts
+    /// them in free grid slots instead of on top of the saved ones. Positions
+    /// for ids not in the graph are ignored. As with
+    /// [`LiveSession::with_graph`], a graph that does not build is accepted.
+    pub fn from_document(doc: GraphDocument, registry: Registry) -> Self {
+        let GraphDocument { graph, positions } = doc;
+        let mut layout = Layout::new();
+        for (id, pos) in positions {
+            // A non-finite position (only possible in a document built in
+            // code; the parser rejects them) is treated as missing, so the
+            // node is auto-placed rather than drawn nowhere and then silently
+            // dropped on the next save.
+            if graph.nodes.contains_key(&id) && pos.0.is_finite() && pos.1.is_finite() {
+                layout.set_position(id, pos);
+            }
+        }
+        layout.place_missing(&graph);
+        Self::with_layout(graph, layout, registry)
+    }
+
+    /// Snapshot the graph and its layout for saving
+    /// ([`GraphDocument::to_text`]). Only structure and layout are saved:
+    /// inputs, taps and watches are runtime attachments, not part of the
+    /// document.
+    pub fn to_document(&self) -> GraphDocument {
+        GraphDocument {
+            graph: self.graph.clone(),
+            positions: self
+                .layout
+                .iter()
+                .map(|(id, pos)| (id.clone(), pos))
+                .collect(),
+        }
+    }
+
+    fn with_layout(graph: Graph, layout: Layout, registry: Registry) -> Self {
         let mut session = Self {
             graph,
             layout,
