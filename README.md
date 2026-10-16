@@ -124,7 +124,9 @@ Bevy); UI frontends adapt to it. The pieces:
   line, a parameter inspector for the selected node (Tab/Enter/Esc to pick,
   edit and apply a value, which rebuilds the pipeline live) and the selected
   node's live preview, and feeds it real mouse/keyboard input (Space
-  plays/pauses). Try it with
+  plays/pauses). All editor text uses a bundled Unicode monospace font
+  (DejaVu Sans Mono, embedded in the binary), so non-ASCII ids, values and
+  paths render. Try it with
   `cargo run --features bevy --example editor`.
 
 Realizing the vision above: an `Entity`'s `label` is a `NodeId`; its `inputs` /

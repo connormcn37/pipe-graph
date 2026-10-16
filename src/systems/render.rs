@@ -19,6 +19,9 @@
 //!   output frame (from [`EditorPreview`]'s tap) under its box, re-uploading
 //!   the texture only when the tap's sequence number moves.
 //!
+//! All text uses the bundled Unicode font ([`super::font::EditorFont`]), not
+//! Bevy's ASCII-only default, so non-ASCII ids, values and paths render.
+//!
 //! This plugin needs `DefaultPlugins` (gizmos, sprites, text, input, windows).
 //! Tests use [`super::PipeGraphInteractPlugin`] under `MinimalPlugins` instead.
 
@@ -32,6 +35,7 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::sprite::Anchor;
 use bevy::window::PrimaryWindow;
 
+use super::font::{EditorFont, setup_editor_font};
 use super::inspect::{EditKey, EditorKeys, ParamInspector, inspector_text};
 use super::interact::{
     DragState, EditorDrag, EditorPointer, EditorSelection, PipeGraphInteractPlugin, Selection,
@@ -73,7 +77,8 @@ impl Plugin for PipeGraphRenderPlugin {
         if !app.is_plugin_added::<PipeGraphInteractPlugin>() {
             app.add_plugins(PipeGraphInteractPlugin);
         }
-        app.add_systems(Startup, (spawn_status_text, spawn_inspector_text))
+        app.add_systems(PreStartup, setup_editor_font)
+            .add_systems(Startup, (spawn_status_text, spawn_inspector_text))
             .add_systems(
                 Update,
                 (
@@ -152,6 +157,7 @@ pub fn gather_key_input(mut events: MessageReader<KeyboardInput>, mut keys: ResM
 /// despawned with it.
 pub fn attach_node_visuals(
     mut commands: Commands,
+    font: Res<EditorFont>,
     added: Query<(Entity, &NodeView, &NodeShape), Added<NodeView>>,
 ) {
     for (entity, view, shape) in &added {
@@ -162,13 +168,13 @@ pub fn attach_node_visuals(
         node.insert(Sprite::from_color(BOX_FILL, shape.size));
         node.with_child((
             Text2d::new(fit_label(&view.id.0, TITLE_FONT_SIZE, header_text_width())),
-            TextFont::from_font_size(TITLE_FONT_SIZE),
+            font.text_font(TITLE_FONT_SIZE),
             TextColor(TITLE),
             Transform::from_xyz(0.0, title_y, 1.0),
         ));
         node.with_child((
             Text2d::new(fit_label(&shape.kind, KIND_FONT_SIZE, header_text_width())),
-            TextFont::from_font_size(KIND_FONT_SIZE),
+            font.text_font(KIND_FONT_SIZE),
             TextColor(PORT_LABEL),
             Transform::from_xyz(0.0, kind_y, 1.0),
         ));
@@ -182,7 +188,7 @@ pub fn attach_node_visuals(
                 let at = pin_offset(&shape.ports, side, i) + Vec2::new(inset, 0.0);
                 node.with_child((
                     Text2d::new(port.0.clone()),
-                    TextFont::from_font_size(11.0),
+                    font.text_font(11.0),
                     TextColor(PORT_LABEL),
                     anchor,
                     Transform::from_translation(at.extend(1.0)),
@@ -248,11 +254,11 @@ pub fn draw_graph(
 #[derive(Component)]
 pub struct StatusText;
 
-pub fn spawn_status_text(mut commands: Commands) {
+pub fn spawn_status_text(mut commands: Commands, font: Res<EditorFont>) {
     commands.spawn((
         StatusText,
         Text::new(""),
-        TextFont::from_font_size(14.0),
+        font.text_font(14.0),
         TextColor(STATUS),
         Node {
             position_type: PositionType::Absolute,
@@ -393,11 +399,11 @@ pub fn update_preview(
 #[derive(Component)]
 pub struct InspectorText;
 
-pub fn spawn_inspector_text(mut commands: Commands) {
+pub fn spawn_inspector_text(mut commands: Commands, font: Res<EditorFont>) {
     commands.spawn((
         InspectorText,
         Text::new(""),
-        TextFont::from_font_size(14.0),
+        font.text_font(14.0),
         TextColor(STATUS),
         Node {
             position_type: PositionType::Absolute,

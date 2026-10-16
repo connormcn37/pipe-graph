@@ -36,6 +36,7 @@
 //! Geometry shared by rendering and hit testing lives in [`layout`] as plain
 //! functions, so "where is this pin" has exactly one answer.
 
+pub mod font;
 pub mod inspect;
 pub mod interact;
 pub mod layout;
