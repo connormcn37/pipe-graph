@@ -3,6 +3,17 @@ name = "pipe-graph"
 version = "0.1.0"
 edition = "2024"
 
+# The lib and bin have no `#[bench]` functions; opting them out of the bench
+# harness keeps `cargo bench -- <criterion flags>` (e.g. `--save-baseline`)
+# from being rejected by libtest's argument parser.
+[lib]
+bench = false
+
+[[bin]]
+name = "pipe-graph"
+path = "src/main.rs"
+bench = false
+
 [dependencies]
 bevy = { version = "0.18.0", optional = true }
 # Pinned to the wgpu Bevy uses, so the editor and the runtime can share a device.
@@ -14,6 +25,16 @@ pollster = { version = "0.4", optional = true }
 # advance widths. Pinned to the version Bevy's text stack already pulls in, so
 # it adds nothing new to the dependency tree.
 ttf-parser = "=0.25.1"
+
+# Benchmarks only (never linked into the library). Default features are off to
+# keep the dev build lean: no `rayon` (criterion's own parallel analysis is not
+# needed for a handful of benches). `plotters` + `html_reports` are kept so the
+# manually-run bench workflow can upload a browsable HTML report.
+criterion = { version = "0.8", default-features = false, features = [
+    "cargo_bench_support",
+    "html_reports",
+    "plotters",
+] }
 
 [features]
 # Default to headless core runtime.
@@ -31,3 +52,18 @@ gpu = ["dep:wgpu", "dep:pollster"]
 [[example]]
 name = "editor"
 required-features = ["bevy"]
+
+# Criterion benchmarks (see docs/benchmarks.md). `harness = false` hands `main`
+# to criterion instead of libtest's unstable bencher. Run all with
+# `cargo bench`, or one with e.g. `cargo bench --bench stages`.
+[[bench]]
+name = "stages"
+harness = false
+
+[[bench]]
+name = "scheduler"
+harness = false
+
+[[bench]]
+name = "pipeline"
+harness = false

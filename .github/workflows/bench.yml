@@ -1,0 +1,40 @@
+name: Bench
+
+# Manual only. Benchmarks on shared CI runners are too noisy to gate merges on,
+# and a full run takes several minutes, so they are kept out of the main CI
+# workflow; trigger this from the Actions tab when you want numbers.
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    name: cargo bench (headless)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Installs the toolchain pinned in rust-toolchain.toml.
+      - name: Install Rust
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bench
+
+      # Headless only: the benches exercise the core runtime, and building
+      # Bevy in release mode would add a long compile for nothing.
+      - name: Bench
+        run: cargo bench
+
+      # Criterion's estimates (JSON) and HTML report; open
+      # criterion/report/index.html from the downloaded artifact.
+      - name: Upload criterion report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-report
+          path: target/criterion
+          if-no-files-found: warn

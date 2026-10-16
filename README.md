@@ -100,6 +100,9 @@ Bevy); UI frontends adapt to it. The pieces:
   - Per-pixel pack (`gain`, `grayscale`, `invert`, `threshold`, `box_blur`;
     `u8` + `f32`) gives real workloads; `cargo run --release --example
     bench_pipeline` times a 1080p split → 3×(blur → gain) → merge graph.
+  - Criterion benchmarks (`cargo bench`) for stages, scheduler overhead and the
+    full pipeline, with a baseline, are described in
+    [`docs/benchmarks.md`](docs/benchmarks.md).
 - **`io`** — video sources/sinks over one pure-Rust Y4M codec: `y4m_source` /
   `y4m_sink` for files, `ffmpeg_source` / `ffmpeg_sink` piping Y4M through an
   `ffmpeg` process (no new dependencies). Sources end with
