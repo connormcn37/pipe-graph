@@ -6,6 +6,17 @@ edition = "2024"
 [dependencies]
 bevy = { version = "0.18.0", optional = true }
 
+# Benchmarks only (never linked into the library). Default features are off to
+# keep the dev build lean: no `rayon` (criterion's own parallel analysis is not
+# needed for a handful of benches). `plotters` + `html_reports` are kept so the
+# manually-run bench workflow can upload a browsable HTML report.
+[dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = [
+    "cargo_bench_support",
+    "html_reports",
+    "plotters",
+] }
+
 [features]
 # Default to headless core runtime.
 default = []
@@ -18,3 +29,18 @@ bevy = ["dep:bevy"]
 [[example]]
 name = "editor"
 required-features = ["bevy"]
+
+# Criterion benchmarks (see docs/benchmarks.md). `harness = false` hands `main`
+# to criterion instead of libtest's unstable bencher. Run all with
+# `cargo bench`, or one with e.g. `cargo bench --bench stages`.
+[[bench]]
+name = "stages"
+harness = false
+
+[[bench]]
+name = "scheduler"
+harness = false
+
+[[bench]]
+name = "pipeline"
+harness = false
