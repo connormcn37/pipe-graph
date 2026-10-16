@@ -47,3 +47,12 @@ jobs:
 
       - name: Test
         run: cargo test ${{ matrix.features }}
+
+      # Docs must build warning-free, both the public API and the private-item
+      # docs (much of the design reasoning lives on private items).
+      - name: Docs
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: |
+          cargo doc --no-deps ${{ matrix.features }}
+          cargo doc --no-deps --document-private-items ${{ matrix.features }}
