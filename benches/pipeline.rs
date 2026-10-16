@@ -25,11 +25,11 @@ use std::hint::black_box;
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use pipe_graph::data::{Frame, FrameData, Payload};
+use pipe_graph::data::Payload;
 use pipe_graph::exec::{ExecMode, Runtime, builtin_registry};
 use pipe_graph::graph::{Graph, NodeId};
 
-use common::{H, W, frame_f32, frame_u8, port, spec};
+use common::{H, W, frame_bytes, frame_f32, frame_u8, port, spec};
 
 /// Blur radius for every branch, matching the example's default.
 const RADIUS: &str = "4";
@@ -55,13 +55,6 @@ fn build_graph() -> Graph {
             .unwrap();
     }
     g
-}
-
-fn frame_bytes(frame: &Frame) -> u64 {
-    match frame.data() {
-        FrameData::U8(v) => v.len() as u64,
-        FrameData::F32(v) => (v.len() * size_of::<f32>()) as u64,
-    }
 }
 
 fn pipeline(c: &mut Criterion) {

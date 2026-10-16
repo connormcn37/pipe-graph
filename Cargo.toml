@@ -3,6 +3,17 @@ name = "pipe-graph"
 version = "0.1.0"
 edition = "2024"
 
+# The lib and bin have no `#[bench]` functions; opting them out of the bench
+# harness keeps `cargo bench -- <criterion flags>` (e.g. `--save-baseline`)
+# from being rejected by libtest's argument parser.
+[lib]
+bench = false
+
+[[bin]]
+name = "pipe-graph"
+path = "src/main.rs"
+bench = false
+
 [dependencies]
 bevy = { version = "0.18.0", optional = true }
 

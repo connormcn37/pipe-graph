@@ -65,6 +65,14 @@ pub fn pattern_u8(w: u32, h: u32, channels: u32) -> Vec<u8> {
     buf
 }
 
+/// Bytes of pixel data in `frame`, for criterion's `Throughput::Bytes`.
+pub fn frame_bytes(frame: &Frame) -> u64 {
+    match frame.data() {
+        FrameData::U8(v) => v.len() as u64,
+        FrameData::F32(v) => (v.len() * size_of::<f32>()) as u64,
+    }
+}
+
 /// A `W`x`H` frame of the test pattern as `u8`.
 pub fn frame_u8(channels: u32) -> Frame {
     Frame::from_data(W, H, channels, FrameData::U8(pattern_u8(W, H, channels)))

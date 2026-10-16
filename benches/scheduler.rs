@@ -9,8 +9,8 @@
 //!   sequential, so parallel mode cannot win; it measures per-node cost and,
 //!   with fusion on, whether fusing a long run of 1-in/1-out nodes saves
 //!   anything for nodes that do not opt into in-place evaluation.
-//! - `fanout_100`: one source feeding 100 independent sinks. The widest
-//!   possible level, so it measures the cost of parallel dispatch against
+//! - `fanout_100`: one source feeding 99 independent sinks (100 nodes, like
+//!   the chain). The widest possible level, so it measures the cost of parallel dispatch against
 //!   doing 100 trivial evals inline.
 //!
 //! Each shape runs in all four `{serial, parallel} x {fusion off, on}`

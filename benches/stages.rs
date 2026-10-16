@@ -27,11 +27,11 @@ use std::hint::black_box;
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use pipe_graph::data::{Frame, FrameData, Payload};
-use pipe_graph::exec::{Inputs, Node, Outputs, builtin_registry};
+use pipe_graph::data::{Frame, Payload};
+use pipe_graph::exec::{Inputs, Node, Outputs, Registry, builtin_registry};
 use pipe_graph::graph::PortId;
 
-use common::{H, W, frame_f32, frame_u8, spec};
+use common::{H, W, frame_bytes, frame_f32, frame_u8, spec};
 
 /// Which element type a case feeds the stage.
 #[derive(Clone, Copy)]
@@ -56,12 +56,19 @@ impl Dtype {
     }
 }
 
-/// Bytes of pixel data in `frame`, for [`Throughput::Bytes`].
-fn frame_bytes(frame: &Frame) -> u64 {
-    match frame.data() {
-        FrameData::U8(v) => v.len() as u64,
-        FrameData::F32(v) => (v.len() * size_of::<f32>()) as u64,
-    }
+thread_local! {
+    /// Built once and reused: constructing the registry per case is cheap but
+    /// pointless setup churn. (`Registry` holds non-`Sync` constructors, so a
+    /// thread-local rather than a `static`.)
+    static REGISTRY: Registry = builtin_registry();
+}
+
+/// Build a builtin node of `kind` from string params, as a graph file would.
+fn build(kind: &str, params: &[(&str, &str)]) -> Box<dyn Node> {
+    REGISTRY.with(|reg| {
+        reg.build(&spec("n", kind, params))
+            .unwrap_or_else(|e| panic!("building {kind}: {e:?}"))
+    })
 }
 
 /// Build the [`Inputs`] for one evaluation from `(port, frame)` pairs.
@@ -105,9 +112,7 @@ fn bench_eval(
 
 /// A 1-in/1-out stage with ports `in`/`out`, fed a 3-channel frame.
 fn bench_unary(c: &mut Criterion, group: &str, kind: &str, params: &[(&str, &str)], dt: Dtype) {
-    let node = builtin_registry()
-        .build(&spec("n", kind, params))
-        .unwrap_or_else(|e| panic!("building {kind}: {e:?}"));
+    let node = build(kind, params);
     let frame = dt.frame(3);
     let bytes = frame_bytes(&frame);
     bench_eval(
@@ -150,9 +155,7 @@ fn crop(c: &mut Criterion) {
     ];
     let params: Vec<(&str, &str)> = params.iter().map(|(k, v)| (*k, v.as_str())).collect();
     for dt in [Dtype::U8, Dtype::F32] {
-        let node = builtin_registry()
-            .build(&spec("n", "crop", &params))
-            .unwrap();
+        let node = build("crop", &params);
         let frame = dt.frame(3);
         // Bytes actually read: the cropped region, not the whole frame.
         let bytes = frame_bytes(&frame) * u64::from(w * h) / u64::from(W * H);
@@ -174,9 +177,7 @@ fn cast(c: &mut Criterion) {
         ("u8_to_f32", Dtype::U8, "f32"),
         ("f32_to_u8", Dtype::F32, "u8"),
     ] {
-        let node = builtin_registry()
-            .build(&spec("n", "cast", &[("dtype", target)]))
-            .unwrap();
+        let node = build("cast", &[("dtype", target)]);
         let frame = src.frame(3);
         let bytes = frame_bytes(&frame);
         bench_eval(
@@ -193,9 +194,7 @@ fn cast(c: &mut Criterion) {
 fn split_merge(c: &mut Criterion) {
     for dt in [Dtype::U8, Dtype::F32] {
         // split: one interleaved RGB frame -> three planes.
-        let node = builtin_registry()
-            .build(&spec("n", "split", &[("channels", "3")]))
-            .unwrap();
+        let node = build("split", &[("channels", "3")]);
         let frame = dt.frame(3);
         let bytes = frame_bytes(&frame);
         bench_eval(
@@ -209,9 +208,7 @@ fn split_merge(c: &mut Criterion) {
 
         // merge: three planes -> one interleaved RGB frame. Same total bytes
         // as the split input, so the two rows are directly comparable.
-        let node = builtin_registry()
-            .build(&spec("n", "merge", &[("channels", "3")]))
-            .unwrap();
+        let node = build("merge", &[("channels", "3")]);
         let planes: Vec<(String, Frame)> =
             (0..3).map(|i| (format!("in{i}"), dt.frame(1))).collect();
         let bytes = planes.iter().map(|(_, f)| frame_bytes(f)).sum();
@@ -222,7 +219,7 @@ fn split_merge(c: &mut Criterion) {
 /// Settings shared by every stage bench.
 ///
 /// One eval is milliseconds, so 20 samples over ~2s gives stable medians while
-/// keeping the whole file (~30 benchmarks) to roughly two minutes.
+/// keeping the whole file (22 benchmarks) to roughly two minutes on a quiet machine.
 fn config() -> Criterion {
     Criterion::default()
         .sample_size(20)
