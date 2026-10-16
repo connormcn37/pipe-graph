@@ -9,13 +9,20 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::data::PayloadKind;
-use crate::exec::{BuildError, PortSet, Registry};
+use crate::exec::{BuildError, ParamIssue, PortSet, Registry};
 use crate::graph::{Graph, NodeId, PortId};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ValidationError {
     /// A node referenced by an edge is not present in the graph.
     MissingNode(NodeId),
+    /// A node's params violate its kind's declared schema. Reported before
+    /// the node is built, listing *every* issue (not just the first one the
+    /// stage's parser would hit), each naming its param.
+    Params {
+        node: NodeId,
+        issues: Vec<ParamIssue>,
+    },
     /// A node's `kind` has no registered constructor (or failed to build).
     Build { node: NodeId, error: BuildError },
     /// An edge's source port is not a declared output of its node.
@@ -37,6 +44,16 @@ impl std::fmt::Display for ValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ValidationError::MissingNode(n) => write!(f, "edge references missing node '{}'", n.0),
+            ValidationError::Params { node, issues } => {
+                write!(f, "node '{}': ", node.0)?;
+                for (i, issue) in issues.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, "; ")?;
+                    }
+                    write!(f, "{issue}")?;
+                }
+                Ok(())
+            }
             ValidationError::Build { node, error } => {
                 write!(f, "node '{}': {error}", node.0)
             }
@@ -72,6 +89,16 @@ pub fn validate(graph: &Graph, reg: &Registry) -> Result<(), ValidationError> {
     // Resolve each node's port set once.
     let mut ports: HashMap<&NodeId, PortSet> = HashMap::with_capacity(graph.nodes.len());
     for (id, spec) in &graph.nodes {
+        // Schema check first: it reports all param problems by name, and it
+        // keeps obviously bad values (e.g. a huge `split` channel count) from
+        // ever reaching a constructor. Kinds without a schema skip this.
+        let issues = reg.check_params(spec);
+        if !issues.is_empty() {
+            return Err(ValidationError::Params {
+                node: id.clone(),
+                issues,
+            });
+        }
         let ps = reg.ports_of(spec).map_err(|error| ValidationError::Build {
             node: id.clone(),
             error,
@@ -189,6 +216,51 @@ mod tests {
                 port: PortId("in".to_string()),
             }
         );
+    }
+
+    #[test]
+    fn param_issues_are_reported_before_building() {
+        let reg = builtin_registry();
+        let mut g = Graph::new();
+        let mut p = Params::new();
+        p.insert("channel".to_string(), "purple".to_string());
+        p.insert("chanel".to_string(), "red".to_string());
+        g.add_node(NodeSpec {
+            id: NodeId("a".to_string()),
+            kind: "clear_channel".to_string(),
+            params: p,
+        })
+        .unwrap();
+        let err = validate(&g, &reg).unwrap_err();
+        let ValidationError::Params { node, issues } = &err else {
+            panic!("expected a Params error, got {err:?}");
+        };
+        assert_eq!(node, &NodeId("a".to_string()));
+        let names: Vec<&str> = issues.iter().map(ParamIssue::name).collect();
+        assert_eq!(names, ["chanel", "channel"]);
+        assert_eq!(
+            err.to_string(),
+            "node 'a': unknown parameter 'chanel'; \
+             parameter 'channel' = 'purple' is not one of red|green|blue"
+        );
+    }
+
+    #[test]
+    fn kinds_without_a_schema_skip_param_checks() {
+        let mut reg = Registry::new();
+        reg.register("custom", |_| {
+            Ok(Box::new(crate::stages::InvertStage::new()) as Box<dyn crate::exec::Node>)
+        });
+        let mut g = Graph::new();
+        let mut p = Params::new();
+        p.insert("whatever".to_string(), "1".to_string());
+        g.add_node(NodeSpec {
+            id: NodeId("a".to_string()),
+            kind: "custom".to_string(),
+            params: p,
+        })
+        .unwrap();
+        assert!(validate(&g, &reg).is_ok());
     }
 
     #[test]

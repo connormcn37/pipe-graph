@@ -21,6 +21,7 @@ use super::y4m::{Chroma, Y4mError, Y4mHeader, Y4mReader, Y4mWriter};
 use super::{frame_in_ports, frame_out_ports, parse_fps};
 use crate::data::Payload;
 use crate::exec::{BuildError, Inputs, Node, NodeError, Outputs, ParamsExt, PortSet};
+use crate::exec::{KindInfo, ParamKind, ParamSpec};
 use crate::graph::Params;
 
 /// Name of the program spawned. Resolved through `PATH`.
@@ -173,6 +174,22 @@ impl FfmpegSource {
                 )))
             }
         }
+    }
+}
+
+impl FfmpegSource {
+    /// Parameter schema for this kind; kept beside `try_from` so the two
+    /// change together (cross-checked in `exec::registry` tests).
+    pub fn info() -> KindInfo {
+        KindInfo::new(
+            "ffmpeg_source",
+            "Decode any input ffmpeg can read into RGB u8 frames (needs ffmpeg on PATH).",
+            vec![ParamSpec::required(
+                "path",
+                ParamKind::Path,
+                "Input file, URL or device, passed to ffmpeg's -i.",
+            )],
+        )
     }
 }
 
@@ -342,6 +359,28 @@ impl FfmpegSink {
             stderr,
             finished: false,
         })
+    }
+}
+
+impl FfmpegSink {
+    /// Parameter schema for this kind; kept beside `try_from` so the two
+    /// change together (cross-checked in `exec::registry` tests).
+    pub fn info() -> KindInfo {
+        KindInfo::new(
+            "ffmpeg_sink",
+            "Encode 1- or 3-channel u8 frames with ffmpeg (needs ffmpeg on PATH).",
+            vec![
+                ParamSpec::required(
+                    "path",
+                    ParamKind::Path,
+                    "Output file; ffmpeg picks the container from its extension.",
+                ),
+                ParamSpec::optional("fps", ParamKind::FrameRate, "Output frame rate.")
+                    .with_default("25"),
+                ParamSpec::optional("pix_fmt", ParamKind::Str, "ffmpeg output pixel format.")
+                    .with_default("yuv420p"),
+            ],
+        )
     }
 }
 

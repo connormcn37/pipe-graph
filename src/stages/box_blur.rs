@@ -24,6 +24,7 @@ use std::ops::{AddAssign, SubAssign};
 
 use crate::data::{Frame, FrameData, Payload, PayloadKind};
 use crate::exec::{BuildError, Inputs, Node, NodeError, Outputs, ParamsExt, PortSet, PortSpec};
+use crate::exec::{KindInfo, ParamKind, ParamSpec};
 use crate::graph::Params;
 
 /// 1→1 stage that box-blurs every channel with the given `radius`.
@@ -46,6 +47,28 @@ impl BoxBlurStage {
             Self::MAX_RADIUS
         );
         Self { radius }
+    }
+}
+
+impl BoxBlurStage {
+    /// Parameter schema for this kind; kept beside `try_from` so the two
+    /// change together (cross-checked in `exec::registry` tests).
+    pub fn info() -> KindInfo {
+        KindInfo::new(
+            "box_blur",
+            "Per-channel mean over a (2r+1)x(2r+1) window, edges clamped.",
+            vec![
+                ParamSpec::required(
+                    "radius",
+                    ParamKind::U32 {
+                        min: Some(0),
+                        max: Some(Self::MAX_RADIUS),
+                    },
+                    "Window radius r in pixels; 0 is an identity copy.",
+                )
+                .with_default("1"),
+            ],
+        )
     }
 }
 

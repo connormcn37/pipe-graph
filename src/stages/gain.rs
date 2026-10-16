@@ -12,6 +12,7 @@
 
 use crate::data::{Frame, FrameData, Payload, PayloadKind};
 use crate::exec::{BuildError, Inputs, Node, NodeError, Outputs, ParamsExt, PortSet, PortSpec};
+use crate::exec::{KindInfo, ParamKind, ParamSpec};
 use crate::graph::Params;
 
 /// 1→1 stage that scales every sample by `factor`.
@@ -32,6 +33,28 @@ impl GainStage {
             *slot = (v as f32 * factor).round().clamp(0.0, 255.0) as u8;
         }
         Self { factor, lut }
+    }
+}
+
+impl GainStage {
+    /// Parameter schema for this kind; kept beside `try_from` so the two
+    /// change together (cross-checked in `exec::registry` tests).
+    pub fn info() -> KindInfo {
+        KindInfo::new(
+            "gain",
+            "Multiply every sample by `factor` (u8 saturates).",
+            vec![
+                ParamSpec::required(
+                    "factor",
+                    ParamKind::F32 {
+                        min: None,
+                        max: None,
+                    },
+                    "Multiplier.",
+                )
+                .with_default("1.0"),
+            ],
+        )
     }
 }
 
