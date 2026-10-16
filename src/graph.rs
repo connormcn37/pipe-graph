@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 mod text;
-pub use text::{ParseError, ParseErrorKind};
+pub use text::{FORMAT_VERSION, GraphDocument, ParseError, ParseErrorKind};
 
 /// Stable identifier for a node/stage in the graph.
 ///

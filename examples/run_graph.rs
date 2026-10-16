@@ -4,8 +4,9 @@
 //! cargo run --example run_graph -- <file> [ticks] [--input <node>.<port>=<W>x<H>x<C>[:<value>]]...
 //! ```
 //!
-//! * `<file>` — a graph in the `Graph::to_text` format
-//!   (e.g. `examples/graphs/split_merge.graph`).
+//! * `<file>` — a graph in the `Graph::to_text` format, v1 or v2 (e.g.
+//!   `examples/graphs/split_merge.graph` or `split_merge_v2.graph`); a v2
+//!   file's layout (`pos` lines) is validated but ignored.
 //! * `[ticks]` — how many times to run the graph (default 1).
 //! * `--input node.port=WxHxC:V` — feed a synthetic `u8` frame of the given
 //!   shape, every sample set to `V`, into a source node's input port. Repeat

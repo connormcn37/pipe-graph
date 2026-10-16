@@ -1,0 +1,14 @@
+pipe-graph 2
+node crop crop h=2 w=2 x=1 y=1
+node merge merge channels=3
+node split split channels=3
+node src clear_channel channel=green
+edge src.out -> split.in
+edge split.out2 -> merge.in0
+edge split.out1 -> merge.in1
+edge split.out0 -> merge.in2
+edge merge.out -> crop.in
+pos crop 690 40
+pos merge 460 40
+pos split 230 -12.5
+pos src 0 0
