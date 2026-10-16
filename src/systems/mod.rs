@@ -26,16 +26,18 @@
 //!   abstract pointer state ([`EditorPointer`]) into node moves, selection and
 //!   queued `EditorCommand`s, and routes abstract keystrokes ([`EditorKeys`])
 //!   to parameter edits through the [`ParamInspector`] or to shortcuts
-//!   (play/pause, delete). Also headless: it never reads windows or devices,
+//!   (play/pause, delete, fit-to-view via [`FitView`]). Also headless: it never reads windows or devices,
 //!   so tests drive it by writing those resources.
 //! - [`PipeGraphRenderPlugin`] ([`render`]) — the only part that needs a
 //!   window/renderer: fills [`EditorPointer`] from mouse/keyboard, gives views
-//!   sprites and labels, draws pins and edges with gizmos, and shows the
-//!   status line, the parameter inspector and the selected node's preview.
+//!   sprites and labels, draws pins and edges with gizmos, shows the status
+//!   line, the parameter inspector and the selected node's preview, and pans,
+//!   zooms and fits the camera (math in [`camera`]).
 //!
 //! Geometry shared by rendering and hit testing lives in [`layout`] as plain
 //! functions, so "where is this pin" has exactly one answer.
 
+pub mod camera;
 pub mod font;
 pub mod inspect;
 pub mod interact;
@@ -50,6 +52,7 @@ use crate::editor::{EditorCommand, LiveSession, SessionError, view_diff};
 use crate::exec::{PortSet, Tap, builtin_registry};
 use crate::graph::{Graph, NodeId, Params, PortId};
 
+pub use self::camera::FitView;
 pub use self::inspect::{EditKey, EditorKeys, ParamInspector, route_keys};
 pub use self::interact::{
     DragState, EditorDrag, EditorPointer, EditorSelection, PipeGraphInteractPlugin, Selection,

@@ -14,6 +14,10 @@
 //!   in order; [`super::route_keys`] decides what they mean (parameter
 //!   editing, play/pause, delete). [`update_inspector_text`] draws the
 //!   parameter inspector panel.
+//! - [`navigate_camera`] pans (middle- or right-drag) and zooms (wheel,
+//!   about the cursor) the 2D camera; [`fit_camera`] frames every node on
+//!   startup and whenever [`FitView`] is requested (`F`). The math is in
+//!   [`super::camera`]; these only read devices and write the camera.
 //! - [`update_status_text`] shows play state and the session's last error in a
 //!   screen-space line; [`update_preview`] shows the selected node's latest
 //!   output frame (from [`EditorPreview`]'s tap) under its box, re-uploading
@@ -30,11 +34,16 @@ use std::collections::HashMap;
 use bevy::asset::RenderAssetUsages;
 use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput};
+use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::sprite::Anchor;
 use bevy::window::PrimaryWindow;
 
+use super::camera::{
+    FitView, PIXELS_PER_LINE, boxes_bounds, center_keeping, fit_rect, screen_to_world,
+    wheel_zoom_factor, zoom_about,
+};
 use super::font::{EditorFont, setup_editor_font};
 use super::inspect::{EditKey, EditorKeys, ParamInspector, inspector_text};
 use super::interact::{
@@ -88,6 +97,7 @@ impl Plugin for PipeGraphRenderPlugin {
                     draw_graph.after(handle_pointer),
                     update_status_text.after(super::EditorCoreSystems),
                     update_preview.after(super::EditorCoreSystems),
+                    (fit_camera.after(super::route_keys), navigate_camera).chain(),
                 ),
             );
     }
@@ -433,4 +443,121 @@ pub fn update_inspector_text(
     } else {
         STATUS
     };
+}
+
+/// The projection's orthographic scale (the zoom), mutably, or `None` for a
+/// perspective or custom projection, which the editor does not navigate.
+fn ortho_scale(projection: &mut Projection) -> Option<&mut f32> {
+    match projection {
+        Projection::Orthographic(ortho) => Some(&mut ortho.scale),
+        _ => None,
+    }
+}
+
+/// Pan and zoom the editor camera from the mouse.
+///
+/// - **Pan**: pressing the middle or right button remembers the world point
+///   under the cursor; while either is held, the camera is re-centered every
+///   frame so that point stays exactly under the cursor
+///   ([`center_keeping`]). Re-solving from the grab point, rather than adding
+///   up per-frame deltas, means no drift and no dependence on raw mouse
+///   motion (which some platforms report unaccelerated). The left button is
+///   left alone: it belongs to selection, node drags and wiring.
+/// - **Zoom**: the wheel zooms about the world point under the cursor (or the
+///   view center when the cursor is outside the window), clamped by
+///   [`zoom_about`]. Pixel-unit deltas (touchpads) are converted to notches.
+///
+/// Works in screen space from the camera's current `Transform` and the
+/// logical viewport size, assuming Bevy's default 2D projection
+/// (`ScalingMode::WindowSize`, centered origin) that `Camera2d` requires.
+pub fn navigate_camera(
+    mouse: Res<ButtonInput<MouseButton>>,
+    scroll: Res<AccumulatedMouseScroll>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut cameras: Query<(&Camera, &mut Transform, &mut Projection), With<Camera2d>>,
+    mut grab: Local<Option<Vec2>>,
+) {
+    let Ok((camera, mut tf, mut projection)) = cameras.single_mut() else {
+        return;
+    };
+    let (Some(viewport), Some(scale)) =
+        (camera.logical_viewport_size(), ortho_scale(&mut projection))
+    else {
+        return;
+    };
+    let cursor = windows.single().ok().and_then(Window::cursor_position);
+    let mut center = tf.translation.truncate();
+
+    if scroll.delta.y != 0.0 {
+        let lines = match scroll.unit {
+            MouseScrollUnit::Line => scroll.delta.y,
+            MouseScrollUnit::Pixel => scroll.delta.y / PIXELS_PER_LINE,
+        };
+        let anchor = cursor.map_or(center, |c| screen_to_world(center, *scale, viewport, c));
+        (center, *scale) = zoom_about(center, *scale, anchor, wheel_zoom_factor(lines));
+    }
+
+    let panning = [MouseButton::Middle, MouseButton::Right];
+    if !mouse.any_pressed(panning) {
+        *grab = None;
+    } else if let Some(cursor) = cursor {
+        match *grab {
+            // Solved after any zoom above, so zooming mid-pan keeps the
+            // grabbed point under the cursor too.
+            Some(world) => center = center_keeping(world, cursor, *scale, viewport),
+            None => *grab = Some(screen_to_world(center, *scale, viewport, cursor)),
+        }
+    }
+
+    // Write only on change so `Transform` change detection stays quiet.
+    if center != tf.translation.truncate() {
+        tf.translation.x = center.x;
+        tf.translation.y = center.y;
+    }
+}
+
+/// A node view's box as [`fit_camera`] reads it.
+type NodeBox = (&'static NodeShape, &'static Transform);
+
+/// Frame every node box ([`fit_rect`]): once automatically, as soon as the
+/// first nodes exist and the viewport size is known, and again whenever
+/// [`FitView`] is requested. A request with no nodes is dropped; one made
+/// before the camera knows its viewport waits for it.
+pub fn fit_camera(
+    mut fit: ResMut<FitView>,
+    views: Query<NodeBox, (With<NodeView>, Without<Camera2d>)>,
+    mut cameras: Query<(&Camera, &mut Transform, &mut Projection), With<Camera2d>>,
+    mut startup_done: Local<bool>,
+) {
+    if *startup_done && !fit.requested {
+        return;
+    }
+    let Some(bounds) = boxes_bounds(
+        views
+            .iter()
+            .map(|(shape, tf)| (tf.translation.truncate(), shape.size)),
+    ) else {
+        // Nothing to frame; keep waiting for the first nodes at startup.
+        if fit.requested {
+            fit.requested = false;
+        }
+        return;
+    };
+    let Ok((camera, mut tf, mut projection)) = cameras.single_mut() else {
+        return;
+    };
+    let Some((center, new_scale)) = camera
+        .logical_viewport_size()
+        .and_then(|viewport| fit_rect(bounds, viewport))
+    else {
+        return;
+    };
+    let Some(scale) = ortho_scale(&mut projection) else {
+        return;
+    };
+    *scale = new_scale;
+    tf.translation.x = center.x;
+    tf.translation.y = center.y;
+    *startup_done = true;
+    fit.requested = false;
 }

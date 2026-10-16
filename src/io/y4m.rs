@@ -21,7 +21,7 @@
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 
-use crate::data::{Frame, FrameData};
+use crate::data::{ColorSpace, Frame, FrameData, Meta};
 
 /// Longest header / frame line we accept. Real headers are ~60 bytes; the cap
 /// only exists so a non-Y4M input cannot make us buffer without bound.
@@ -234,6 +234,8 @@ pub struct Y4mReader<R: Read> {
     header: Y4mHeader,
     /// Reused planar buffer, so steady-state reading does not allocate it.
     planes: Vec<u8>,
+    /// Frames returned so far: the next frame's index.
+    frames_read: u64,
 }
 
 impl<R: Read> Y4mReader<R> {
@@ -250,6 +252,7 @@ impl<R: Read> Y4mReader<R> {
             inner,
             header,
             planes,
+            frames_read: 0,
         })
     }
 
@@ -280,9 +283,21 @@ impl<R: Read> Y4mReader<R> {
 
     /// Read the next frame as a 3-channel `u8` RGB [`Frame`] (mono streams are
     /// expanded to grey RGB, so downstream stages see one shape).
+    ///
+    /// The frame is stamped with its index, its presentation time and duration
+    /// from the header's frame rate, and the sRGB colour space (decoded video
+    /// RGB is gamma-encoded).
     pub fn read_rgb(&mut self) -> Result<Option<Frame>, Y4mError> {
         let header = self.header.clone();
-        Ok(self.read_planes()?.map(|p| planes_to_rgb(&header, p)))
+        let Some(frame) = self.read_planes()?.map(|p| planes_to_rgb(&header, p)) else {
+            return Ok(None);
+        };
+        let meta = Meta {
+            color: ColorSpace::Srgb,
+            ..Meta::for_frame(self.frames_read, header.fps_num, header.fps_den)
+        };
+        self.frames_read += 1;
+        Ok(Some(frame.with_meta(meta)))
     }
 }
 

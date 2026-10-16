@@ -65,6 +65,12 @@ fn describe(p: &Payload) -> String {
         ),
         Payload::Scalar(v) => format!("Scalar {v}"),
         Payload::Bytes(b) => format!("Bytes len={}", b.len()),
+        Payload::Audio(a) => format!(
+            "Audio {} Hz x{} ch, {} frames",
+            a.sample_rate,
+            a.channels,
+            a.frames()
+        ),
     }
 }
 
