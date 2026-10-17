@@ -130,6 +130,25 @@ impl GpuContext {
         }
     }
 
+    /// A small read-only storage buffer holding `values`: kernel parameters
+    /// (floats go in as their bits, `f32::to_bits`).
+    pub fn params(&self, values: &[u32]) -> wgpu::Buffer {
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("kernel params"),
+            size: (values.len().max(1) * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: true,
+        });
+        {
+            let mut view = buffer.slice(..).get_mapped_range_mut();
+            for (dst, v) in view.chunks_exact_mut(4).zip(values) {
+                dst.copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        buffer.unmap();
+        buffer
+    }
+
     /// How many command buffers this context (and its clones) has submitted:
     /// a measure of batching, for tests and diagnostics.
     pub fn submissions(&self) -> u64 {

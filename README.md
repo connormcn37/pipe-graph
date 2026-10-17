@@ -140,7 +140,9 @@ Bevy); UI frontends adapt to it. The pieces:
 - **GPU (`gpu` feature, wgpu):** a `Frame`'s samples live in a `Storage`
   — on the CPU, on the GPU (`GpuBuffer`), or in external storage — and move
   with `to_cpu` / `to_gpu`, which borrow when the samples are already there.
-  A stage may add `Node::eval_gpu` beside `eval`; `invert` has one.
+  A stage may add `Node::eval_gpu` beside `eval`; all built-in stages but
+  `clear_channel` have one, kept in agreement with the CPU path by
+  `tests/gpu_conformance.rs`.
   `Runtime::set_backend(Backend::Gpu(ctx))` (or `Auto`) runs such stages on
   the device: CPU stages are still handed CPU frames, transfers happen only
   where the graph crosses over, and each pass is one GPU submission. GPU

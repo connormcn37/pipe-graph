@@ -85,6 +85,49 @@ impl Node for ThresholdStage {
         )
     }
 
+    #[cfg(feature = "gpu")]
+    fn supports_gpu(&self) -> bool {
+        true
+    }
+
+    /// Bit-identical to `eval`: `u8` goes through the same table.
+    #[cfg(feature = "gpu")]
+    fn eval_gpu(
+        &mut self,
+        ctx: &crate::gpu::GpuContext,
+        inputs: &Inputs,
+        outputs: &mut Outputs,
+    ) -> Option<Result<(), NodeError>> {
+        use super::gpu_kernels as k;
+        use crate::data::DType;
+        use crate::gpu::GpuBuffer;
+        Some((|| {
+            let frame = inputs.frame("in")?;
+            let src = frame.to_gpu(ctx)?;
+            let dst = GpuBuffer::zeroed(ctx, src.dtype(), src.len());
+            let bufs = [src.buffer(), dst.buffer()];
+            match src.dtype() {
+                DType::U8 => k::dispatch(
+                    ctx,
+                    k::LUT_U8,
+                    &bufs,
+                    &k::lut_params(&self.lut),
+                    k::threads(&dst),
+                ),
+                DType::F32 => k::dispatch(
+                    ctx,
+                    k::THRESHOLD_F32,
+                    &bufs,
+                    &[self.level.to_bits()],
+                    k::threads(&dst),
+                ),
+            }
+            let out = Frame::from_gpu(frame.width, frame.height, frame.channels, dst);
+            outputs.set("out", Payload::Frame(out));
+            Ok(())
+        })())
+    }
+
     fn eval(&mut self, inputs: &Inputs, outputs: &mut Outputs) -> Result<(), NodeError> {
         let frame = inputs.frame("in")?;
         let level = self.level;

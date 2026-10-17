@@ -55,21 +55,13 @@ impl TryFrom<&Params> for MergeStage {
     }
 }
 
-impl Node for MergeStage {
-    fn ports(&self) -> PortSet {
-        let inputs = (0..self.channels)
-            .map(|c| PortSpec::new(format!("in{c}"), PayloadKind::Frame))
-            .collect();
-        PortSet::new(inputs, vec![PortSpec::new("out", PayloadKind::Frame)])
-    }
-
-    fn eval(&mut self, inputs: &Inputs, outputs: &mut Outputs) -> Result<(), NodeError> {
+impl MergeStage {
+    /// The `channels` input frames, in order, if they can be merged: present,
+    /// single-channel, and alike in size and dtype.
+    fn check<'a>(&self, inputs: &'a Inputs) -> Result<Vec<&'a Frame>, NodeError> {
         let k = self.channels as usize;
-
-        // Collect and validate the k single-channel inputs.
         let first = inputs.frame("in0")?;
         let (w, h, dtype) = (first.width, first.height, first.dtype());
-        let pixels = first.pixel_count();
 
         let mut frames = Vec::with_capacity(k);
         for c in 0..k {
@@ -91,6 +83,73 @@ impl Node for MergeStage {
             }
             frames.push(fr);
         }
+        Ok(frames)
+    }
+}
+
+impl Node for MergeStage {
+    fn ports(&self) -> PortSet {
+        let inputs = (0..self.channels)
+            .map(|c| PortSpec::new(format!("in{c}"), PayloadKind::Frame))
+            .collect();
+        PortSet::new(inputs, vec![PortSpec::new("out", PayloadKind::Frame)])
+    }
+
+    #[cfg(feature = "gpu")]
+    fn supports_gpu(&self) -> bool {
+        true
+    }
+
+    /// A pure move: bit-identical to `eval`. One pass per input, each
+    /// writing only its own channel.
+    #[cfg(feature = "gpu")]
+    fn eval_gpu(
+        &mut self,
+        ctx: &crate::gpu::GpuContext,
+        inputs: &Inputs,
+        outputs: &mut Outputs,
+    ) -> Option<Result<(), NodeError>> {
+        use super::gpu_kernels as k;
+        use crate::data::DType;
+        use crate::gpu::GpuBuffer;
+        Some((|| {
+            let frames = self.check(inputs)?;
+            let k = self.channels;
+            let first = frames[0];
+            let pixels = first.pixel_count();
+            let n = pixels * k as usize;
+            let dst = GpuBuffer::zeroed(ctx, first.dtype(), n);
+            for (c, frame) in frames.iter().enumerate() {
+                let src = frame.to_gpu(ctx)?;
+                let bufs = [src.buffer(), dst.buffer()];
+                match first.dtype() {
+                    DType::U8 => k::dispatch(
+                        ctx,
+                        k::MERGE_U8,
+                        &bufs,
+                        &[k, c as u32, n as u32],
+                        k::threads(&dst),
+                    ),
+                    DType::F32 => k::dispatch(
+                        ctx,
+                        k::MERGE_W,
+                        &bufs,
+                        &[k, c as u32, pixels as u32],
+                        pixels as u32,
+                    ),
+                }
+            }
+            let out = Frame::from_gpu(first.width, first.height, k, dst);
+            outputs.set("out", Payload::Frame(out));
+            Ok(())
+        })())
+    }
+
+    fn eval(&mut self, inputs: &Inputs, outputs: &mut Outputs) -> Result<(), NodeError> {
+        let k = self.channels as usize;
+        let frames = self.check(inputs)?;
+        let (w, h, dtype) = (frames[0].width, frames[0].height, frames[0].dtype());
+        let pixels = frames[0].pixel_count();
 
         let data = match dtype {
             DType::U8 => {

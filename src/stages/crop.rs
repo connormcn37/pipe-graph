@@ -141,6 +141,47 @@ impl Node for CropStage {
         )
     }
 
+    #[cfg(feature = "gpu")]
+    fn supports_gpu(&self) -> bool {
+        true
+    }
+
+    /// A pure move: bit-identical to `eval`.
+    #[cfg(feature = "gpu")]
+    fn eval_gpu(
+        &mut self,
+        ctx: &crate::gpu::GpuContext,
+        inputs: &Inputs,
+        outputs: &mut Outputs,
+    ) -> Option<Result<(), NodeError>> {
+        use super::gpu_kernels as k;
+        use crate::data::DType;
+        use crate::gpu::GpuBuffer;
+        Some((|| {
+            let frame = inputs.frame("in")?;
+            self.check_bounds(frame)?;
+            let ch = frame.channels;
+            let n = self.w as usize * self.h as usize * ch as usize;
+            let src = frame.to_gpu(ctx)?;
+            let dst = GpuBuffer::zeroed(ctx, src.dtype(), n);
+            let params = [0, n as u32, frame.width, ch, self.x, self.y, self.w];
+            let kernel = match src.dtype() {
+                DType::U8 => k::GATHER_U8,
+                DType::F32 => k::GATHER_W,
+            };
+            k::dispatch(
+                ctx,
+                kernel,
+                &[src.buffer(), dst.buffer()],
+                &params,
+                k::threads(&dst),
+            );
+            let out = Frame::from_gpu(self.w, self.h, ch, dst);
+            outputs.set("out", Payload::Frame(out));
+            Ok(())
+        })())
+    }
+
     fn eval(&mut self, inputs: &Inputs, outputs: &mut Outputs) -> Result<(), NodeError> {
         let frame = inputs.frame("in")?;
         self.check_bounds(frame)?;

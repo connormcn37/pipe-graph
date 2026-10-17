@@ -82,6 +82,61 @@ impl Node for CastStage {
         )
     }
 
+    #[cfg(feature = "gpu")]
+    fn supports_gpu(&self) -> bool {
+        true
+    }
+
+    /// Bit-identical to `eval`, rounding `f32 -> u8` half away from zero as
+    /// Rust does. Casting to the same dtype passes the frame through.
+    #[cfg(feature = "gpu")]
+    fn eval_gpu(
+        &mut self,
+        ctx: &crate::gpu::GpuContext,
+        inputs: &Inputs,
+        outputs: &mut Outputs,
+    ) -> Option<Result<(), NodeError>> {
+        use super::gpu_kernels as k;
+        use crate::data::DType;
+        use crate::gpu::GpuBuffer;
+        Some((|| {
+            let frame = inputs.frame("in")?;
+            let (w, h, ch) = (frame.width, frame.height, frame.channels);
+            let out = match (frame.dtype(), self.dtype) {
+                (DType::U8, DType::F32) => {
+                    let src = frame.to_gpu(ctx)?;
+                    let dst = GpuBuffer::zeroed(ctx, DType::F32, src.len());
+                    let scale = self.scale.unwrap_or(1.0 / 255.0);
+                    k::dispatch(
+                        ctx,
+                        k::CAST_U8_F32,
+                        &[src.buffer(), dst.buffer()],
+                        &[scale.to_bits()],
+                        k::threads(&dst),
+                    );
+                    Frame::from_gpu(w, h, ch, dst)
+                }
+                (DType::F32, DType::U8) => {
+                    let src = frame.to_gpu(ctx)?;
+                    let dst = GpuBuffer::zeroed(ctx, DType::U8, src.len());
+                    let scale = self.scale.unwrap_or(255.0);
+                    let params = [scale.to_bits(), src.len() as u32];
+                    k::dispatch(
+                        ctx,
+                        k::CAST_F32_U8,
+                        &[src.buffer(), dst.buffer()],
+                        &params,
+                        k::threads(&dst),
+                    );
+                    Frame::from_gpu(w, h, ch, dst)
+                }
+                _ => frame.clone(),
+            };
+            outputs.set("out", Payload::Frame(out));
+            Ok(())
+        })())
+    }
+
     fn eval(&mut self, inputs: &Inputs, outputs: &mut Outputs) -> Result<(), NodeError> {
         let frame = inputs.frame("in")?;
         let (w, h, ch) = (frame.width, frame.height, frame.channels);

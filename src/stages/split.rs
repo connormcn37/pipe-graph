@@ -59,6 +59,20 @@ fn extract_channel<T: Copy>(src: &[T], k: usize, c: usize, pixels: usize) -> Vec
     (0..pixels).map(|p| src[p * k + c]).collect()
 }
 
+impl SplitStage {
+    /// The input's channel count, if it is the one this split was built for.
+    fn check(&self, frame: &Frame) -> Result<u32, NodeError> {
+        let k = self.channels;
+        if frame.channels != k {
+            return Err(NodeError::Message(format!(
+                "split expected {k} channels, got {}",
+                frame.channels
+            )));
+        }
+        Ok(k)
+    }
+}
+
 impl Node for SplitStage {
     fn ports(&self) -> PortSet {
         let outputs = (0..self.channels)
@@ -67,16 +81,51 @@ impl Node for SplitStage {
         PortSet::new(vec![PortSpec::new("in", PayloadKind::Frame)], outputs)
     }
 
+    #[cfg(feature = "gpu")]
+    fn supports_gpu(&self) -> bool {
+        true
+    }
+
+    /// A pure move: bit-identical to `eval`. One gather per channel.
+    #[cfg(feature = "gpu")]
+    fn eval_gpu(
+        &mut self,
+        ctx: &crate::gpu::GpuContext,
+        inputs: &Inputs,
+        outputs: &mut Outputs,
+    ) -> Option<Result<(), NodeError>> {
+        use super::gpu_kernels as k;
+        use crate::data::DType;
+        use crate::gpu::GpuBuffer;
+        Some((|| {
+            let frame = inputs.frame("in")?;
+            let k = self.check(frame)?;
+            let pixels = frame.pixel_count();
+            let src = frame.to_gpu(ctx)?;
+            let kernel = match src.dtype() {
+                DType::U8 => k::GATHER_U8,
+                DType::F32 => k::GATHER_W,
+            };
+            for c in 0..k {
+                let dst = GpuBuffer::zeroed(ctx, src.dtype(), pixels);
+                let params = [1, pixels as u32, k, c];
+                k::dispatch(
+                    ctx,
+                    kernel,
+                    &[src.buffer(), dst.buffer()],
+                    &params,
+                    k::threads(&dst),
+                );
+                let out = Frame::from_gpu(frame.width, frame.height, 1, dst);
+                outputs.set(&format!("out{c}"), Payload::Frame(out));
+            }
+            Ok(())
+        })())
+    }
+
     fn eval(&mut self, inputs: &Inputs, outputs: &mut Outputs) -> Result<(), NodeError> {
         let frame = inputs.frame("in")?;
-        let k = self.channels;
-
-        if frame.channels != k {
-            return Err(NodeError::Message(format!(
-                "split expected {k} channels, got {}",
-                frame.channels
-            )));
-        }
+        let k = self.check(frame)?;
 
         let (w, h) = (frame.width, frame.height);
         let pixels = frame.pixel_count();
