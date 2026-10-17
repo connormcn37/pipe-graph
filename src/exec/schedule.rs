@@ -21,6 +21,12 @@
 //! condensation level by level ([`Plan::levels`]) and evaluates the acyclic
 //! nodes of a level concurrently on scoped threads; see
 //! [`Runtime::set_exec_mode`].
+//!
+//! With the `gpu` feature, `Runtime::set_backend` places nodes that have a
+//! GPU implementation on a device. Frames then cross between CPU and GPU only
+//! where the graph does: a CPU stage is always handed CPU frames (downloaded
+//! if needed), a GPU stage uploads what it reads, and GPU work is submitted
+//! once per pass.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -31,6 +37,13 @@ use crate::exec::{
     validate,
 };
 use crate::graph::{EdgeId, Graph, NodeId, PortId};
+
+#[cfg(feature = "gpu")]
+use crate::gpu::GpuContext;
+/// Without the `gpu` feature there is no device to place a node on: a
+/// placement is always `None`, and this type has no values.
+#[cfg(not(feature = "gpu"))]
+type GpuContext = std::convert::Infallible;
 
 /// Default bound on iterations for a cyclic component within one `run_once`.
 pub const DEFAULT_MAX_ITERS: u32 = 16;
@@ -140,7 +153,10 @@ impl Convergence {
                             .zip(y)
                             .all(|(&p, &q)| p == q || (p - q).abs() <= eps);
                 }
-                // Mismatched dtypes.
+                // Mismatched dtypes, or samples off the CPU (comparing them
+                // would mean downloading): treated as changed, so a loop on
+                // the GPU runs its full iteration count rather than stopping
+                // on a guess.
                 false
             }
             _ => false,
@@ -164,6 +180,26 @@ impl Convergence {
 /// match; NaN matches nothing.
 fn within(a: f64, b: f64, eps: f64) -> bool {
     a == b || (a - b).abs() <= eps
+}
+
+/// Where nodes run; see `Runtime::set_backend` (`gpu` feature).
+#[cfg(feature = "gpu")]
+#[derive(Debug, Clone, Default)]
+pub enum Backend {
+    /// Everything on the CPU (the default).
+    #[default]
+    Cpu,
+    /// Every node with a GPU implementation ([`Node::supports_gpu`]) runs on
+    /// this device; the rest stay on the CPU.
+    Gpu(GpuContext),
+    /// Like [`Backend::Gpu`], except that a GPU-capable node with no
+    /// GPU-capable neighbour stays on the CPU: one kernel is not worth an
+    /// upload and a download. Runs of GPU-capable stages move as a group.
+    ///
+    /// Note for feedback loops: [`Convergence`] compares frames on the CPU
+    /// only, so a cycle whose frames are on the GPU never counts as converged
+    /// early and always runs [`Runtime::set_max_iters`] iterations.
+    Auto(GpuContext),
 }
 
 /// How [`Runtime::run_once`] evaluates the plan.
@@ -589,6 +625,10 @@ pub struct Runtime {
     exec_mode: ExecMode,
     /// [`Plan::levels`], cached: the plan never changes for this runtime.
     levels: Vec<Vec<usize>>,
+    /// The device GPU-placed nodes run on; `None` is the CPU backend.
+    gpu: Option<GpuContext>,
+    /// Nodes placed on [`Runtime::gpu`]; see `Runtime::set_backend`.
+    on_gpu: HashSet<NodeId>,
 }
 
 /// How a component takes part in fused execution.
@@ -673,6 +713,8 @@ impl Runtime {
             last_iters,
             exec_mode: ExecMode::Serial,
             levels,
+            gpu: None,
+            on_gpu: HashSet::new(),
         };
         runtime.recompute_fusable();
         Ok(runtime)
@@ -783,6 +825,72 @@ impl Runtime {
     /// The current [`ExecMode`].
     pub fn exec_mode(&self) -> ExecMode {
         self.exec_mode
+    }
+
+    /// Choose where nodes run (default [`Backend::Cpu`]).
+    ///
+    /// Placement is per node and decided here, from the graph and from which
+    /// nodes have a GPU implementation ([`Node::supports_gpu`]); see
+    /// [`Backend`] for the policies and [`Runtime::placement`] for the result.
+    /// Like [`Runtime::set_exec_mode`], switching rebuilds nothing.
+    ///
+    /// Results do not depend on placement beyond each stage's documented
+    /// CPU/GPU tolerance. What changes is where frames live: an output a
+    /// GPU-placed node produces stays on the GPU, including in
+    /// [`Runtime::output`] and taps; read it with [`crate::data::Frame::to_cpu`].
+    /// GPU work is recorded during a pass and submitted once at its end (or
+    /// earlier, when something downloads a frame).
+    #[cfg(feature = "gpu")]
+    pub fn set_backend(&mut self, backend: Backend) {
+        let capable: HashSet<NodeId> = self
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.supports_gpu())
+            .map(|(id, _)| id.clone())
+            .collect();
+        let (gpu, on_gpu) = match backend {
+            Backend::Cpu => (None, HashSet::new()),
+            Backend::Gpu(ctx) => (Some(ctx), capable),
+            Backend::Auto(ctx) => {
+                // A lone GPU-capable stage between CPU stages would pay an
+                // upload and a download for one kernel: keep it on the CPU.
+                // Capable nodes linked to another capable node move together.
+                let linked: HashSet<NodeId> = self
+                    .edges
+                    .iter()
+                    .filter(|e| capable.contains(&e.from.0) && capable.contains(&e.to.0))
+                    .flat_map(|e| [e.from.0.clone(), e.to.0.clone()])
+                    .collect();
+                (Some(ctx), linked)
+            }
+        };
+        self.gpu = gpu;
+        self.on_gpu = on_gpu;
+    }
+
+    /// Where `node` runs under the current backend: [`Location::Gpu`] or
+    /// [`Location::Cpu`]. `None` for an unknown node.
+    ///
+    /// [`Location::Gpu`]: crate::data::Location::Gpu
+    /// [`Location::Cpu`]: crate::data::Location::Cpu
+    pub fn placement(&self, node: &NodeId) -> Option<crate::data::Location> {
+        self.nodes.get(node)?;
+        Some(if self.on_gpu.contains(node) {
+            crate::data::Location::Gpu
+        } else {
+            crate::data::Location::Cpu
+        })
+    }
+
+    /// The device `id` runs on, if it is placed on one.
+    // Without the `gpu` feature `GpuContext` is uninhabited (and so `Copy`).
+    #[cfg_attr(not(feature = "gpu"), allow(clippy::clone_on_copy))]
+    fn place(&self, id: &NodeId) -> Option<GpuContext> {
+        if self.on_gpu.contains(id) {
+            self.gpu.clone()
+        } else {
+            None
+        }
     }
 
     /// Inject a value on a node's input port (feeds "source" nodes whose input
@@ -1028,6 +1136,18 @@ impl Runtime {
 
     /// Execute the whole plan once (acyclic steps once; cyclic steps iterate).
     pub fn run_once(&mut self) -> Result<(), RunError> {
+        let result = self.run_pass();
+        // Everything GPU-placed nodes recorded during the pass goes to the
+        // device as one submission (also after a failure, so nothing recorded
+        // lingers into the next pass).
+        #[cfg(feature = "gpu")]
+        if let Some(ctx) = &self.gpu {
+            ctx.flush();
+        }
+        result
+    }
+
+    fn run_pass(&mut self) -> Result<(), RunError> {
         if let ExecMode::Parallel { threads } = self.exec_mode {
             return self.run_parallel(threads);
         }
@@ -1088,8 +1208,9 @@ impl Runtime {
 
     fn eval_node(&mut self, id: &NodeId) -> Result<(), RunError> {
         let inputs = self.gather(id);
+        let gpu = self.place(id);
         let node = self.nodes.get_mut(id).expect("compiled node exists");
-        let outputs = run_eval(node, &inputs).map_err(|error| RunError {
+        let outputs = run_eval(node, &inputs, gpu.as_ref()).map_err(|error| RunError {
             node: id.clone(),
             error,
         })?;
@@ -1194,6 +1315,8 @@ impl Runtime {
 
         let chains: Vec<Vec<NodeId>> = units.iter().map(|u| self.unit_ids(u)).collect();
         let head_inputs: Vec<Inputs> = chains.iter().map(|ids| self.gather(&ids[0])).collect();
+        let head_gpus: Vec<Option<GpuContext>> =
+            chains.iter().map(|ids| self.place(&ids[0])).collect();
         let wirings: Vec<Vec<MemberWiring>> = chains
             .iter()
             .map(|ids| ids[1..].iter().map(|id| self.member_wiring(id)).collect())
@@ -1208,13 +1331,14 @@ impl Runtime {
             let work: Vec<_> = chains
                 .iter()
                 .zip(&head_inputs)
+                .zip(&head_gpus)
                 .zip(&wirings)
-                .map(|((ids, inputs), wirings)| {
+                .map(|(((ids, inputs), gpu), wirings)| {
                     let nodes: Vec<&mut Box<dyn Node>> = ids
                         .iter()
                         .map(|id| by_id.remove(id).expect("compiled node exists"))
                         .collect();
-                    (nodes, inputs, wirings.as_slice())
+                    (nodes, (inputs, gpu.as_ref()), wirings.as_slice())
                 })
                 .collect();
 
@@ -1272,8 +1396,9 @@ impl Runtime {
             let mut pending: Vec<(NodeId, Outputs)> = Vec::with_capacity(nodes.len());
             for id in nodes {
                 let inputs = self.gather(id);
+                let gpu = self.place(id);
                 let node = self.nodes.get_mut(id).expect("compiled node exists");
-                let outputs = run_eval(node, &inputs).map_err(|error| RunError {
+                let outputs = run_eval(node, &inputs, gpu.as_ref()).map_err(|error| RunError {
                     node: id.clone(),
                     error,
                 })?;
@@ -1375,8 +1500,9 @@ impl Runtime {
 
     /// Call `id`'s [`Node::eval`] on `inputs`, attributing a failure to `id`.
     fn eval_with(&mut self, id: &NodeId, inputs: &Inputs) -> Result<Outputs, RunError> {
+        let gpu = self.place(id);
         let node = self.nodes.get_mut(id).expect("compiled node exists");
-        run_eval(node, inputs).map_err(|error| RunError {
+        run_eval(node, inputs, gpu.as_ref()).map_err(|error| RunError {
             node: id.clone(),
             error,
         })
@@ -1449,6 +1575,7 @@ impl Runtime {
             links,
             external: self.external.get(id).cloned().unwrap_or_default(),
             in_place,
+            gpu: self.place(id),
         }
     }
 
@@ -1526,15 +1653,41 @@ impl Runtime {
 
 /// Evaluate one node against already-gathered inputs, touching nothing else in
 /// the runtime — the unit of work a parallel batch hands to a thread.
-fn eval_detached(node: &mut Box<dyn Node>, inputs: &Inputs) -> Result<Outputs, NodeError> {
-    run_eval(node, inputs)
+fn eval_detached(
+    node: &mut Box<dyn Node>,
+    inputs: &Inputs,
+    gpu: Option<&GpuContext>,
+) -> Result<Outputs, NodeError> {
+    run_eval(node, inputs, gpu)
 }
 
-/// Run `node`'s [`Node::eval`] on `inputs`, then let its outputs inherit the
-/// inputs' metadata — the one place every evaluation path goes through.
-fn run_eval(node: &mut Box<dyn Node>, inputs: &Inputs) -> Result<Outputs, NodeError> {
+/// Evaluate `node` on `inputs` where it is placed, then let its outputs
+/// inherit the inputs' metadata — the one place every evaluation path goes
+/// through.
+///
+/// Placed on a device (`gpu` is `Some`), the node's GPU implementation runs,
+/// reading inputs wherever they are; a node without one falls back to the
+/// CPU. On the CPU, any frame that lives elsewhere is downloaded first
+/// ([`Inputs::on_cpu`]), so CPU stages only ever see CPU frames.
+fn run_eval(
+    node: &mut Box<dyn Node>,
+    inputs: &Inputs,
+    gpu: Option<&GpuContext>,
+) -> Result<Outputs, NodeError> {
+    #[cfg(feature = "gpu")]
+    if let Some(ctx) = gpu {
+        let mut outputs = Outputs::new();
+        if let Some(result) = node.eval_gpu(ctx, inputs, &mut outputs) {
+            result?;
+            inherit_meta(inputs, &mut outputs);
+            return Ok(outputs);
+        }
+    }
+    #[cfg(not(feature = "gpu"))]
+    let _ = gpu;
+
     let mut outputs = Outputs::new();
-    node.eval(inputs, &mut outputs)?;
+    node.eval(&*inputs.on_cpu()?, &mut outputs)?;
     inherit_meta(inputs, &mut outputs);
     Ok(outputs)
 }
@@ -1573,6 +1726,8 @@ struct MemberWiring {
     /// `(input, output)` when the member is 1-in/1-out and fed by exactly one
     /// link into that input: the case [`Node::eval_in_place`] can serve.
     in_place: Option<(PortId, PortId)>,
+    /// The device the member is placed on, if any.
+    gpu: Option<GpuContext>,
 }
 
 /// Evaluate a non-head member of a fused run on the previous member's outputs
@@ -1603,12 +1758,18 @@ fn eval_member(
     // it copies nothing and nobody else can observe the change. A shared value
     // (a producer caching its output via `Outputs::set_shared`, or one output
     // fanned into two ports) goes to `eval`, which reads it without copying.
+    // In-place evaluation is a CPU path: a GPU-placed member goes to
+    // `run_eval`, which uses its GPU implementation.
     if let Some((input, output)) = &wiring.in_place
+        && wiring.gpu.is_none()
         && let Some(value) = shared.remove(input)
     {
         let lead = value.meta().copied().filter(|m| !m.is_unset());
         match Arc::try_unwrap(value) {
-            Ok(mut payload) => match node.eval_in_place(&mut payload) {
+            Ok(mut payload) => match on_cpu_in_place(&mut payload)
+                .and_then(|()| node.eval_in_place(&mut payload).transpose())
+                .transpose()
+            {
                 Some(Ok(())) => {
                     // A stage may rebuild the value outright (crop, cast);
                     // keep the input's metadata unless it set its own.
@@ -1634,7 +1795,19 @@ fn eval_member(
         }
     }
 
-    run_eval(node, &Inputs::from_shared(shared))
+    run_eval(node, &Inputs::from_shared(shared), wiring.gpu.as_ref())
+}
+
+/// Bring an owned frame's samples to the CPU, in place, before a CPU stage
+/// transforms it with [`Node::eval_in_place`]. Free for a CPU frame.
+fn on_cpu_in_place(payload: &mut Payload) -> Result<(), NodeError> {
+    if let Payload::Frame(frame) = payload
+        && frame.location() != crate::data::Location::Cpu
+    {
+        let downloaded = frame.clone().into_cpu()?;
+        *frame = downloaded;
+    }
+    Ok(())
 }
 
 /// A unit of work in a parallel level: one node, or a whole fused run.
@@ -1661,11 +1834,11 @@ struct ChainOutcome {
 /// `nodes[i + 1]`.
 fn run_chain(
     mut nodes: Vec<&mut Box<dyn Node>>,
-    head_inputs: &Inputs,
+    (head_inputs, head_gpu): (&Inputs, Option<&GpuContext>),
     wirings: &[MemberWiring],
 ) -> ChainOutcome {
     let mut kept = Vec::with_capacity(wirings.len());
-    let mut outputs = match eval_detached(&mut *nodes[0], head_inputs) {
+    let mut outputs = match eval_detached(&mut *nodes[0], head_inputs, head_gpu) {
         Ok(outputs) => outputs,
         Err(error) => {
             return ChainOutcome {

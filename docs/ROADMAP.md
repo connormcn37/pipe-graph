@@ -51,13 +51,16 @@ trait-object variant for storage we don't. A trait-only design would push
 stages into runtime downcasts to reach the bytes or buffer they actually work
 on.
 
-**Status (H1):** `Storage`, `Location`, `ExternalStorage`, `to_cpu` /
+**Status (H1, H2):** `Storage`, `Location`, `ExternalStorage`, `to_cpu` /
 `to_gpu` / `into_cpu` / `into_gpu`, `GpuContext` (own or borrowed device),
 `GpuBuffer` (u8 packed four per word), cached WGSL `Kernel`s, and
-`Node::eval_gpu` exist; `invert` is the first stage with a GPU path. The
-scheduler does not call `eval_gpu` yet (H2), so until then nothing hands a
-CPU stage a GPU frame, which is what lets the CPU accessors (`data()`,
-`as_u8()`, …) stay as they were.
+`Node::eval_gpu` exist; `invert` is the first stage with a GPU path.
+`Runtime::set_backend(Cpu | Gpu(ctx) | Auto(ctx))` places nodes (`Auto`
+keeps a lone GPU-capable stage on the CPU), every CPU evaluation is handed
+CPU frames (downloading where needed, including before in-place edits), and
+GPU work is recorded into one command buffer per pass and submitted once.
+Not yet: caching a download shared by several CPU consumers (each downloads
+for itself), and a GPU-backed editor (D8).
 
 **Two implementations per stage.** `Node::eval` is the CPU path; an optional
 `Node::eval_gpu` is the GPU path. Stages without one run on the CPU.
@@ -97,7 +100,7 @@ fusion of whole chains needs.
 
 ## Phase 2 — Capability
 
-- **H2** GPU scheduler: placement, automatic transfers, one submit per fused chain.
+- ~~**H2** GPU scheduler: placement, automatic transfers, one submit per fused chain.~~ Done: one submit per pass.
 - **H3** GPU implementations of the existing stages, with the conformance harness.
 - **C1–C7** New stages, each with CPU + GPU implementations: colour conversion, geometry (resize…), combining frames, frame → scalar measurements, scalar-controlled params, temporal effects, generic convolution.
 - **B1–B4** Video I/O: probing, real-time pacing, seek/loop/range, image sequences.

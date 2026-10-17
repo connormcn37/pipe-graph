@@ -140,7 +140,10 @@ Bevy); UI frontends adapt to it. The pieces:
 - **GPU (`gpu` feature, wgpu):** a `Frame`'s samples live in a `Storage`
   — on the CPU, on the GPU (`GpuBuffer`), or in external storage — and move
   with `to_cpu` / `to_gpu`, which borrow when the samples are already there.
-  A stage may add `Node::eval_gpu` beside `eval`; `invert` has one. GPU
+  A stage may add `Node::eval_gpu` beside `eval`; `invert` has one.
+  `Runtime::set_backend(Backend::Gpu(ctx))` (or `Auto`) runs such stages on
+  the device: CPU stages are still handed CPU frames, transfers happen only
+  where the graph crosses over, and each pass is one GPU submission. GPU
   tests run on any Vulkan/Metal/DX12 adapter, including Mesa's lavapipe.
   See [docs/ROADMAP.md](docs/ROADMAP.md) for where this is going.
 

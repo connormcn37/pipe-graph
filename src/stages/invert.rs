@@ -88,6 +88,11 @@ impl Node for InvertStage {
             Ok(())
         })())
     }
+
+    #[cfg(feature = "gpu")]
+    fn supports_gpu(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(feature = "gpu")]
