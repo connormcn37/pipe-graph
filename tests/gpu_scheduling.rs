@@ -44,10 +44,10 @@ fn id(s: &str) -> NodeId {
 
 /// `a` invert → `b` clear_channel → `c` invert → `d` invert → `e` gain.
 ///
-/// Invert is the only stage with a GPU path, so this crosses CPU/GPU in both
-/// directions, includes a lone GPU-capable node (`a`) and a GPU pair (`c`,
-/// `d`), and puts `clear_channel` — which edits frames in place when fused —
-/// right after a GPU node.
+/// `clear_channel` has no GPU path, so this crosses CPU/GPU in both
+/// directions, includes a lone GPU-capable node (`a`) and a GPU run (`c`,
+/// `d`, `e`), and puts `clear_channel` — which edits frames in place when
+/// fused — right after a GPU node.
 fn mixed_chain() -> Graph {
     let mut g = Graph::new();
     g.add_node(node("a", "invert", &[])).unwrap();
@@ -136,19 +136,21 @@ fn placement_follows_the_policy_and_frames_follow_placement() {
         ("b", Location::Cpu),
         ("c", Location::Gpu),
         ("d", Location::Gpu),
-        ("e", Location::Cpu),
+        ("e", Location::Gpu),
     ];
     for (n, loc) in expected {
         assert_eq!(at(&rt, n), loc, "placement of {n}");
         assert_eq!(lives(&rt, n), loc, "output of {n}");
     }
 
-    // Auto leaves the lone invert `a` on the CPU, moves the `c`→`d` pair.
+    // Auto leaves the lone invert `a` on the CPU, moves the `c`→`d`→`e` run.
     let rt = run(&g, Backend::Auto(ctx.clone()), ExecMode::Serial, true);
     for (n, loc) in [
         ("a", Location::Cpu),
+        ("b", Location::Cpu),
         ("c", Location::Gpu),
         ("d", Location::Gpu),
+        ("e", Location::Gpu),
     ] {
         assert_eq!(at(&rt, n), loc, "auto placement of {n}");
     }
@@ -157,7 +159,7 @@ fn placement_follows_the_policy_and_frames_follow_placement() {
     let mut rt = run(&g, Backend::Gpu(ctx), ExecMode::Serial, true);
     rt.set_backend(Backend::Cpu);
     rt.run_once().unwrap();
-    for n in ["a", "c", "d"] {
+    for n in ["a", "c", "d", "e"] {
         assert_eq!((at(&rt, n), lives(&rt, n)), (Location::Cpu, Location::Cpu));
     }
     assert_eq!(rt.placement(&id("nope")), None);

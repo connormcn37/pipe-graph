@@ -48,6 +48,17 @@ impl TryFrom<&Params> for GrayscaleStage {
     }
 }
 
+/// The input's channel count, if grayscale has a luma for it (3 or 4).
+fn check_channels(frame: &Frame) -> Result<usize, NodeError> {
+    let k = frame.channels as usize;
+    if k != 3 && k != 4 {
+        return Err(NodeError::Message(format!(
+            "grayscale needs a 3- or 4-channel frame, got {k} channels"
+        )));
+    }
+    Ok(k)
+}
+
 impl Node for GrayscaleStage {
     fn ports(&self) -> PortSet {
         PortSet::new(
@@ -56,14 +67,49 @@ impl Node for GrayscaleStage {
         )
     }
 
+    #[cfg(feature = "gpu")]
+    fn supports_gpu(&self) -> bool {
+        true
+    }
+
+    /// Bit-identical to `eval` for `u8` (integer arithmetic); `f32` may differ
+    /// in the last bit where the device fuses multiply-adds.
+    #[cfg(feature = "gpu")]
+    fn eval_gpu(
+        &mut self,
+        ctx: &crate::gpu::GpuContext,
+        inputs: &Inputs,
+        outputs: &mut Outputs,
+    ) -> Option<Result<(), NodeError>> {
+        use super::gpu_kernels as k;
+        use crate::data::DType;
+        use crate::gpu::GpuBuffer;
+        Some((|| {
+            let frame = inputs.frame("in")?;
+            let k = check_channels(frame)? as u32;
+            let pixels = frame.pixel_count();
+            let src = frame.to_gpu(ctx)?;
+            let dst = GpuBuffer::zeroed(ctx, src.dtype(), pixels);
+            let bufs = [src.buffer(), dst.buffer()];
+            match src.dtype() {
+                DType::U8 => k::dispatch(
+                    ctx,
+                    k::GRAYSCALE_U8,
+                    &bufs,
+                    &[k, pixels as u32],
+                    k::threads(&dst),
+                ),
+                DType::F32 => k::dispatch(ctx, k::GRAYSCALE_F32, &bufs, &[k], k::threads(&dst)),
+            }
+            let out = Frame::from_gpu(frame.width, frame.height, 1, dst);
+            outputs.set("out", Payload::Frame(out));
+            Ok(())
+        })())
+    }
+
     fn eval(&mut self, inputs: &Inputs, outputs: &mut Outputs) -> Result<(), NodeError> {
         let frame = inputs.frame("in")?;
-        let k = frame.channels as usize;
-        if k != 3 && k != 4 {
-            return Err(NodeError::Message(format!(
-                "grayscale needs a 3- or 4-channel frame, got {k} channels"
-            )));
-        }
+        let k = check_channels(frame)?;
 
         let data = match frame.data() {
             FrameData::U8(buf) => FrameData::U8(

@@ -32,6 +32,11 @@ pub struct BoxBlurStage {
     radius: u32,
 }
 
+/// Largest `u8` radius the GPU path takes: `255 * (2r + 1)^2` plus rounding
+/// must fit the 32-bit window sum.
+#[cfg(feature = "gpu")]
+pub const GPU_U8_MAX_RADIUS: u32 = 2047;
+
 impl BoxBlurStage {
     /// Largest accepted radius (a 8193-wide window — wider than a 4K frame).
     /// Priming a window costs O(r), so an unbounded radius from a serialized
@@ -206,6 +211,63 @@ impl Node for BoxBlurStage {
             vec![PortSpec::new("in", PayloadKind::Frame)],
             vec![PortSpec::new("out", PayloadKind::Frame)],
         )
+    }
+
+    #[cfg(feature = "gpu")]
+    fn supports_gpu(&self) -> bool {
+        true
+    }
+
+    /// Two separable passes. Bit-identical to `eval` for `u8` (integer
+    /// sums, same rounding); `f32` sums in `f32` where the CPU uses `f64`, so
+    /// results differ by a few ULPs of the window sum. A `u8` radius above
+    /// [`GPU_U8_MAX_RADIUS`] could overflow the GPU's 32-bit sums, so such a
+    /// blur stays on the CPU (returns `None`).
+    #[cfg(feature = "gpu")]
+    fn eval_gpu(
+        &mut self,
+        ctx: &crate::gpu::GpuContext,
+        inputs: &Inputs,
+        outputs: &mut Outputs,
+    ) -> Option<Result<(), NodeError>> {
+        use super::gpu_kernels as k;
+        use crate::data::DType;
+        use crate::gpu::GpuBuffer;
+        let frame = match inputs.frame("in") {
+            Ok(frame) => frame,
+            Err(e) => return Some(Err(e)),
+        };
+        if frame.dtype() == DType::U8 && self.radius > GPU_U8_MAX_RADIUS {
+            return None;
+        }
+        Some((|| {
+            let n = frame.len();
+            let src = frame.to_gpu(ctx)?;
+            let params = [
+                frame.width,
+                frame.height,
+                frame.channels,
+                self.radius,
+                n as u32,
+            ];
+            let sums = GpuBuffer::zeroed(ctx, DType::F32, n);
+            let dst = GpuBuffer::zeroed(ctx, src.dtype(), n);
+            let (h, v) = match src.dtype() {
+                DType::U8 => (k::BLUR_H_U8, k::BLUR_V_U8),
+                DType::F32 => (k::BLUR_H_F32, k::BLUR_V_F32),
+            };
+            k::dispatch(ctx, h, &[src.buffer(), sums.buffer()], &params, n as u32);
+            k::dispatch(
+                ctx,
+                v,
+                &[sums.buffer(), dst.buffer()],
+                &params,
+                k::threads(&dst),
+            );
+            let out = Frame::from_gpu(frame.width, frame.height, frame.channels, dst);
+            outputs.set("out", Payload::Frame(out));
+            Ok(())
+        })())
     }
 
     fn eval(&mut self, inputs: &Inputs, outputs: &mut Outputs) -> Result<(), NodeError> {

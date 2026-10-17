@@ -51,10 +51,13 @@ trait-object variant for storage we don't. A trait-only design would push
 stages into runtime downcasts to reach the bytes or buffer they actually work
 on.
 
-**Status (H1, H2):** `Storage`, `Location`, `ExternalStorage`, `to_cpu` /
+**Status (H1–H3):** `Storage`, `Location`, `ExternalStorage`, `to_cpu` /
 `to_gpu` / `into_cpu` / `into_gpu`, `GpuContext` (own or borrowed device),
 `GpuBuffer` (u8 packed four per word), cached WGSL `Kernel`s, and
-`Node::eval_gpu` exist; `invert` is the first stage with a GPU path.
+`Node::eval_gpu` exist. Every built-in stage except the legacy
+`clear_channel` processor has a GPU path (H3), bit-identical to its CPU path
+except `f32` `box_blur` (sums in `f32`, not `f64`) and `f32` `grayscale`
+(possible fused multiply-add), checked by `tests/gpu_conformance.rs`.
 `Runtime::set_backend(Cpu | Gpu(ctx) | Auto(ctx))` places nodes (`Auto`
 keeps a lone GPU-capable stage on the CPU), every CPU evaluation is handed
 CPU frames (downloading where needed, including before in-place edits), and
@@ -101,7 +104,7 @@ fusion of whole chains needs.
 ## Phase 2 — Capability
 
 - ~~**H2** GPU scheduler: placement, automatic transfers, one submit per fused chain.~~ Done: one submit per pass.
-- **H3** GPU implementations of the existing stages, with the conformance harness.
+- ~~**H3** GPU implementations of the existing stages, with the conformance harness.~~ Done.
 - **C1–C7** New stages, each with CPU + GPU implementations: colour conversion, geometry (resize…), combining frames, frame → scalar measurements, scalar-controlled params, temporal effects, generic convolution.
 - **B1–B4** Video I/O: probing, real-time pacing, seek/loop/range, image sequences.
 - **A3** Buffer pool (CPU and GPU). **A7** Randomized equivalence tests across backends and modes. **E1** Real CLI.

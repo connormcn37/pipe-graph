@@ -22,6 +22,8 @@ mod box_blur;
 mod cast;
 mod crop;
 mod gain;
+#[cfg(feature = "gpu")]
+mod gpu_kernels;
 mod grayscale;
 mod invert;
 mod merge;
