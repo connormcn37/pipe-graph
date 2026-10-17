@@ -32,16 +32,16 @@ pub struct BoxBlurStage {
     radius: u32,
 }
 
-/// Largest `u8` radius the GPU path takes: `255 * (2r + 1)^2` plus rounding
-/// must fit the 32-bit window sum.
-#[cfg(feature = "gpu")]
-pub const GPU_U8_MAX_RADIUS: u32 = 2047;
-
 impl BoxBlurStage {
     /// Largest accepted radius (a 8193-wide window — wider than a 4K frame).
     /// Priming a window costs O(r), so an unbounded radius from a serialized
     /// graph could stall `run_once` for minutes.
     pub const MAX_RADIUS: u32 = 4096;
+
+    /// Largest `u8` radius the GPU path takes: `255 * (2r + 1)^2` plus
+    /// rounding must fit the 32-bit window sum.
+    #[cfg(feature = "gpu")]
+    pub const GPU_U8_MAX_RADIUS: u32 = 2047;
 
     /// Panics if `radius > MAX_RADIUS`; `TryFrom<&Params>` is the fallible
     /// build path.
@@ -221,7 +221,7 @@ impl Node for BoxBlurStage {
     /// Two separable passes. Bit-identical to `eval` for `u8` (integer
     /// sums, same rounding); `f32` sums in `f32` where the CPU uses `f64`, so
     /// results differ by a few ULPs of the window sum. A `u8` radius above
-    /// [`GPU_U8_MAX_RADIUS`] could overflow the GPU's 32-bit sums, so such a
+    /// [`BoxBlurStage::GPU_U8_MAX_RADIUS`] could overflow the GPU's 32-bit sums, so such a
     /// blur stays on the CPU (returns `None`).
     #[cfg(feature = "gpu")]
     fn eval_gpu(
@@ -237,7 +237,7 @@ impl Node for BoxBlurStage {
             Ok(frame) => frame,
             Err(e) => return Some(Err(e)),
         };
-        if frame.dtype() == DType::U8 && self.radius > GPU_U8_MAX_RADIUS {
+        if frame.dtype() == DType::U8 && self.radius > Self::GPU_U8_MAX_RADIUS {
             return None;
         }
         Some((|| {
