@@ -164,3 +164,18 @@ cargo test --features bevy      # also compile/run the Bevy-gated code
 cargo test --features gpu       # GPU paths (skipped if no adapter is found)
 ```
 
+### CLI
+
+The `pipe-graph` binary also takes real subcommands, for loading and running
+a graph file (see `Graph::to_text`/`from_text`) without editing `main.rs`:
+
+```sh
+cargo run -- check examples/graphs/split_merge.graph
+cargo run -- run examples/graphs/split_merge.graph 1 --input src.in=4x4x3:200
+```
+
+`check` parses and validates a graph (ports, params, connections) without
+running it; `run` runs it for the given number of ticks (default 1) and
+prints every captured output port. `--input node.port=WxHxC[:value]` feeds a
+synthetic frame into a source node's input, repeatable for several sources.
+

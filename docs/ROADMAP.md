@@ -107,7 +107,8 @@ fusion of whole chains needs.
 - ~~**H3** GPU implementations of the existing stages, with the conformance harness.~~ Done.
 - **C1–C7** New stages, each with CPU + GPU implementations: colour conversion, geometry (resize…), combining frames, frame → scalar measurements, scalar-controlled params, temporal effects, generic convolution.
 - **B1–B4** Video I/O: probing, real-time pacing, seek/loop/range, image sequences.
-- **A3** Buffer pool (CPU and GPU). **A7** Randomized equivalence tests across backends and modes. **E1** Real CLI.
+- **A3** Buffer pool (CPU and GPU). **A7** Randomized equivalence tests across backends and modes.
+- ~~**E1** Real CLI.~~ Done: `pipe-graph run <file> [ticks] [--input ...]` and `pipe-graph check <file>` (`src/cli.rs`); a bare `cargo run` (or `pipe-graph demo`) still runs the processor/graph demo.
 
 ## Phase 3 — Tool
 

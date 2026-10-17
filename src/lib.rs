@@ -12,6 +12,7 @@
 //! - "Taps" (live previews) should be first-class and non-blocking:
 //!   any stage output can publish "latest value" and/or a bounded stream.
 
+pub mod cli;
 pub mod data;
 pub mod processors;
 #[cfg(feature = "bevy")]

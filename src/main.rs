@@ -1,6 +1,28 @@
-use pipe_graph::{data, processors, traits::Processor};
+use pipe_graph::{cli, data, processors, traits::Processor};
+use std::process::ExitCode;
 
-fn main() {
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.is_empty() {
+        run_demo();
+        return ExitCode::SUCCESS;
+    }
+    if args[0] == "demo" {
+        run_demo();
+        return ExitCode::SUCCESS;
+    }
+    match cli::run(&args) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// The processor-list demo plus a split->merge graph round-trip, run by a
+/// bare `cargo run` or `pipe-graph demo`. Real work goes through `run`/`check`.
+fn run_demo() {
     let mut frame = data::Frame::from_rgb8(
         3,
         3,
